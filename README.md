@@ -24,7 +24,7 @@ AlphaSound/
 ├── data/
 │   ├── raw/                  # Original .wav files
 │   │   ├── english/          # A–Z recordings
-│   │   └── spanish/          # A–Z + CH, LL, RR, Ñ recordings
+│   │   └── spanish/          # A–Z + Ñ recordings
 │   └── processed/            # Mel-spectrograms (numpy arrays)
 │
 ├── src/
