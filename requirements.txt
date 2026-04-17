@@ -1,0 +1,8 @@
+torch>=2.0
+torchaudio>=2.0
+librosa>=0.10
+numpy
+scikit-learn
+matplotlib
+seaborn
+tqdm
