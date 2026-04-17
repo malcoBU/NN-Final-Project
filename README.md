@@ -8,9 +8,9 @@
 
 | | Name | Role |
 |---|---|---|
-| 🧑‍💻 | **Gonzalo** | Model architecture & training |
-| 👩‍💻 | **Lucía** | Data preprocessing & augmentation |
-| 🧑‍🔬 | **Marcos** | Feature extraction & evaluation |
+| 🧑‍💻 | **Gonzalo Borrachero** | Model architecture & training |
+| 👩‍💻 | **Lucía Gámir** | Data preprocessing & augmentation |
+| 🧑‍🔬 | **Marcos Alconchel** | Feature extraction & evaluation |
 
 <br>
 
@@ -228,21 +228,3 @@ This will output:
 
 ---
 
-## 🗺️ Roadmap
-
-- [x] Preprocessing & augmentation pipeline
-- [x] Mel-spectrogram feature extraction
-- [x] CNN + dual-head architecture
-- [x] Training loop with combined loss
-- [ ] Wav2Vec 2.0 fine-tuning for low-data scenarios
-- [ ] Real-time inference demo (microphone input)
-- [ ] REST API with FastAPI
-- [ ] Mobile export via TFLite
-
-<br>
-
----
-
-## 📄 License
-
-This project is licensed under the **MIT License** — see `LICENSE` for details.
