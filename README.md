@@ -105,7 +105,7 @@ Total Loss = 0.7 × CrossEntropy(letter) + 0.3 × CrossEntropy(language)
 | Language | Letters | Total classes |
 |---|---|---|
 | 🇬🇧 English | A – Z | 26 |
-| 🇪🇸 Spanish | A – Z + CH, LL, RR, Ñ | 30 |
+| 🇪🇸 Spanish | A – Z + Ñ | 27 |
 
 <br>
 
