@@ -287,10 +287,10 @@ def waveform_stats(y: np.ndarray, sr: int = TARGET_SR) -> dict:
 
 if __name__ == "__main__":
     preprocess_directory(
-    raw_dir="../data/raw/english",
-    out_dir="../data/processed",
+    raw_dir="./data/raw/english",
+    out_dir="./data/processed",
     verbose=True)
     preprocess_directory(
-    raw_dir="../data/raw/spanish",
-    out_dir="../data/processed",
+    raw_dir="./data/raw/spanish",
+    out_dir="./data/processed",
     verbose=True)
