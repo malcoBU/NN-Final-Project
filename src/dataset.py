@@ -39,8 +39,8 @@ LANGUAGE_TO_IDX: dict[str, int] = {
     "spanish": 1,
 }
 
-# Solo las 26 letras comunes (sin ñ, ll, ch, rr)
-ALL_LETTERS: list[str] = list("abcdefghijklmnopqrstuvwxyz")
+# 26 letras comunes + ñ (exclusiva del español) = 27 clases
+ALL_LETTERS: list[str] = list("abcdefghijklmnopqrstuvwxyz") + ["ñ"]
 
 LETTER_TO_IDX: dict[str, int] = {l: i for i, l in enumerate(ALL_LETTERS)}
 IDX_TO_LETTER: dict[int, str] = {i: l for l, i in LETTER_TO_IDX.items()}
