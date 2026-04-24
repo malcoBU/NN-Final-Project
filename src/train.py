@@ -240,7 +240,7 @@ def train(args: argparse.Namespace) -> None:
     )
 
     # Guardar label maps para inferencia posterior
-    save_label_maps(os.path.join(os.path.dirname(args.data_dir), "data", "label_maps.json"))
+    save_label_maps("./data/label_maps.json")
 
     # ── Modelo ────────────────────────────────────────────────────────────────
     print("\n── Inicializando modelo ─────────────────────────────────")
