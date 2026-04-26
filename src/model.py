@@ -1,177 +1,149 @@
 """
 model.py
 --------
-CNN backbone with two independent classification heads:
-  • letter_head  → predicts which letter was spoken  (up to 30 classes)
-  • lang_head    → predicts the language (English = 0, Spanish = 1)
+EfficientNet-B0 pre-entrenado en ImageNet como backbone compartido,
+con dos cabezas de clasificación independientes:
+  • letter_head  → predice la letra pronunciada  (27 clases: a–z + ñ)
+  • lang_head    → predice el idioma (English=0, Spanish=1)
 
-The backbone is shared: both tasks learn from the same feature extractor,
-which forces the network to build representations useful for both.
+Transfer learning:
+  El backbone (EfficientNet-B0) viene con pesos pre-entrenados en ImageNet.
+  Aunque ImageNet es visión natural, sus filtros reconocen bordes, texturas
+  y patrones locales que son igualmente útiles en espectrogramas.
+  Se modifica solo el primer conv para aceptar 1 canal (escala de grises)
+  en lugar de 3, promediando los pesos pre-entrenados.
+
+  Estrategia de fine-tuning recomendada:
+  • Fase 1: congelar todo el backbone, entrenar solo las cabezas (5-10 épocas)
+  • Fase 2: descongelar y entrenar todo con LR muy bajo (CosineAnnealingLR)
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torchvision.models as tv_models
+from torchvision.models import EfficientNet_B0_Weights
 
 
-# ── Building blocks ───────────────────────────────────────────────────────────
-
-class ConvBlock(nn.Module):
-    """
-    Conv2d → BatchNorm2d → ReLU  (optionally followed by MaxPool2d).
-
-    BatchNorm normalises the activations of each mini-batch, which:
-      • speeds up training (allows higher learning rates)
-      • acts as a mild regulariser (reduces need for large Dropout)
-      • makes the network less sensitive to weight initialisation
-
-    Parameters
-    ----------
-    in_channels : int
-        Number of input feature maps.
-    out_channels : int
-        Number of filters (output feature maps) to learn.
-    kernel_size : int
-        Side length of the convolution window (3 = 3×3).
-    pool : bool
-        Whether to halve the spatial dimensions with MaxPool2d(2) after ReLU.
-    dropout : float
-        Spatial dropout probability (0 = disabled).
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int = 3,
-        pool: bool = True,
-        dropout: float = 0.0,
-    ):
-        super().__init__()
-        layers = [
-            nn.Conv2d(
-                in_channels, out_channels, kernel_size,
-                padding=kernel_size // 2,  # 'same' padding: output H,W unchanged
-                bias=False,                # bias redundant when followed by BN
-            ),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-        ]
-        if pool:
-            layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
-        if dropout > 0:
-            # Dropout2d zeroes entire feature maps (channels), more effective
-            # for CNNs than element-wise dropout
-            layers.append(nn.Dropout2d(p=dropout))
-
-        self.block = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.block(x)
-
-
-class AttentionPool(nn.Module):
-    """
-    Soft attention pooling over the spatial dimensions.
-
-    Instead of simply averaging or taking the max across (H, W), this module
-    learns a scalar attention weight per spatial location so the network can
-    focus on the most discriminative time-frequency regions.
-
-    Input  : (B, C, H, W)
-    Output : (B, C)   — channel-wise weighted sum over H×W
-    """
-
-    def __init__(self, in_channels: int):
-        super().__init__()
-        # 1×1 conv reduces C channels to 1 scalar per spatial location
-        self.attn = nn.Conv2d(in_channels, 1, kernel_size=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # weights: (B, 1, H, W) → softmax over H*W positions
-        w = self.attn(x)
-        w = w.view(w.size(0), 1, -1)          # (B, 1, H*W)
-        w = F.softmax(w, dim=-1)
-        w = w.view(w.size(0), 1, x.size(2), x.size(3))  # (B, 1, H, W)
-
-        # Weighted sum: (B, C, H, W) × (B, 1, H, W) → (B, C)
-        pooled = (x * w).sum(dim=[2, 3])
-        return pooled
-
-
-# ── Main model ────────────────────────────────────────────────────────────────
+# ── Modelo principal ──────────────────────────────────────────────────────────
 
 class AudioLetterClassifier(nn.Module):
     """
-    CNN with a shared backbone and two linear classification heads.
+    EfficientNet-B0 con cabezas duales para clasificación de letra e idioma.
 
-    Architecture
+    Arquitectura
     ------------
-    Input: (B, 1, 128, 128)  — batch of log-Mel spectrograms
+    Input : (B, 1, 128, 128)  — log-Mel spectrogram, 1 canal
 
-    Backbone (3 conv blocks):
-      ConvBlock(1→32,   pool=True)   → (B, 32,  64, 64)
-      ConvBlock(32→64,  pool=True)   → (B, 64,  32, 32)
-      ConvBlock(64→128, pool=True)   → (B, 128, 16, 16)
-      ConvBlock(128→256, pool=False) → (B, 256, 16, 16)
-      AttentionPool                  → (B, 256)
-      Dropout(0.5)
+    Backbone EfficientNet-B0 (pre-entrenado ImageNet):
+      • Primer Conv2d modificado: 3 canales → 1 canal
+        (pesos inicializados como media de los 3 canales originales)
+      • Extrae un mapa de features de 1280 dimensiones
+      • AdaptiveAvgPool2d → (B, 1280)
 
-    Heads:
-      letter_head: Linear(256 → n_letters)
-      lang_head:   Linear(256 → n_langs)
+    Cabezas:
+      letter_head : Dropout → Linear(1280 → n_letters)
+      lang_head   : Dropout → Linear(1280 → n_langs)
 
     Parameters
     ----------
     n_letters : int
-        Number of letter classes (default 30: 26 EN + ñ/ch/ll/rr).
+        Número de clases de letras (default 27: a–z + ñ).
     n_langs : int
-        Number of language classes (default 2: EN + ES).
+        Número de clases de idioma (default 2: EN + ES).
     dropout : float
-        Dropout probability before the classification heads.
+        Dropout antes de las cabezas de clasificación.
+    freeze_backbone : bool
+        Si True, congela el backbone para la Fase 1 del fine-tuning.
+        Llama a unfreeze_backbone() para descongelar en Fase 2.
     """
 
     def __init__(
         self,
-        n_letters: int = 30,
+        n_letters: int = 27,
         n_langs: int = 2,
-        dropout: float = 0.5,
+        dropout: float = 0.4,
+        freeze_backbone: bool = False,
     ):
         super().__init__()
 
-        # ── Backbone ──────────────────────────────────────────────────────────
-        self.backbone = nn.Sequential(
-            ConvBlock(1,    32,  pool=True,  dropout=0.1),   # 128→64
-            ConvBlock(32,   64,  pool=True,  dropout=0.1),   # 64→32
-            ConvBlock(64,  128,  pool=True,  dropout=0.2),   # 32→16
-            ConvBlock(128, 256,  pool=False, dropout=0.0),   # 16→16 (no pool)
+        # ── Cargar EfficientNet-B0 pre-entrenado ──────────────────────────────
+        efficientnet = tv_models.efficientnet_b0(
+            weights=EfficientNet_B0_Weights.IMAGENET1K_V1
         )
 
-        # Attention pooling replaces the naive Flatten+AdaptiveAvgPool combo
-        self.pool    = AttentionPool(in_channels=256)
-        self.dropout = nn.Dropout(p=dropout)
+        # ── Adaptar primer Conv2d: 3 canales → 1 canal ────────────────────────
+        # EfficientNet-B0: features[0] es ConvNormActivation,
+        # y features[0][0] es el Conv2d de entrada.
+        first_conv = efficientnet.features[0][0]  # Conv2d(3, 32, ...)
 
-        # ── Heads ─────────────────────────────────────────────────────────────
-        # Both heads share the same 256-dim feature vector from the backbone.
-        # Each head is a single Linear layer — enough for the final mapping
-        # because the backbone already learned a rich representation.
-        self.letter_head = nn.Linear(256, n_letters)
-        self.lang_head   = nn.Linear(256, n_langs)
+        new_first_conv = nn.Conv2d(
+            in_channels=1,
+            out_channels=first_conv.out_channels,
+            kernel_size=first_conv.kernel_size,
+            stride=first_conv.stride,
+            padding=first_conv.padding,
+            bias=False,
+        )
+        # Inicializar con la media de los 3 canales originales:
+        # preserva la mayoría del conocimiento pre-entrenado
+        new_first_conv.weight.data = first_conv.weight.data.mean(
+            dim=1, keepdim=True
+        )
+        efficientnet.features[0][0] = new_first_conv
 
-        # Weight initialisation
-        self._init_weights()
+        # ── Extraer solo la parte de features (sin el classifier original) ────
+        self.backbone = efficientnet.features   # → (B, 1280, H', W')
+        self.pool     = nn.AdaptiveAvgPool2d(1) # → (B, 1280, 1, 1)
+        self.dropout  = nn.Dropout(p=dropout)
 
-    def _init_weights(self) -> None:
-        """Kaiming He initialisation for Conv layers; Xavier for Linear."""
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.zeros_(m.bias)
+        # ── Cabezas de clasificación ──────────────────────────────────────────
+        # 1280 = número de features de salida de EfficientNet-B0
+        self.letter_head = nn.Linear(1280, n_letters)
+        self.lang_head   = nn.Linear(1280, n_langs)
+
+        # Inicialización de las cabezas
+        nn.init.xavier_uniform_(self.letter_head.weight)
+        nn.init.zeros_(self.letter_head.bias)
+        nn.init.xavier_uniform_(self.lang_head.weight)
+        nn.init.zeros_(self.lang_head.bias)
+
+        if freeze_backbone:
+            self.freeze_backbone()
+
+    # ── Fine-tuning helpers ───────────────────────────────────────────────────
+
+    def freeze_backbone(self) -> None:
+        """
+        Fase 1: congela el backbone para entrenar solo las cabezas.
+        Útil cuando el dataset es muy pequeño — evita destruir los pesos
+        pre-entrenados antes de que las cabezas aprendan algo útil.
+        """
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        print("Backbone congelado. Solo se entrenan las cabezas.")
+
+    def unfreeze_backbone(self) -> None:
+        """
+        Fase 2: descongela el backbone para fine-tuning completo.
+        Llamar después de que las cabezas hayan convergido (Fase 1).
+        Usar con un LR mucho más bajo (e.g., 1e-4 o menos).
+        """
+        for param in self.backbone.parameters():
+            param.requires_grad = True
+        print("Backbone descongelado. Fine-tuning completo activado.")
+
+    def unfreeze_last_n_blocks(self, n: int = 3) -> None:
+        """
+        Alternativa: descongela solo los últimos n bloques del backbone.
+        Compromiso entre Fase 1 y Fase 2 completo.
+        """
+        blocks = list(self.backbone.children())
+        for block in blocks[-n:]:
+            for param in block.parameters():
+                param.requires_grad = True
+        print(f"Últimos {n} bloques del backbone descongelados.")
+
+    # ── Forward ───────────────────────────────────────────────────────────────
 
     def forward(
         self, x: torch.Tensor
@@ -183,13 +155,12 @@ class AudioLetterClassifier(nn.Module):
 
         Returns
         -------
-        letter_logits : torch.Tensor, shape (B, n_letters)
-            Raw scores for each letter class (no softmax applied).
-        lang_logits   : torch.Tensor, shape (B, n_langs)
-            Raw scores for each language class.
+        letter_logits : (B, n_letters)
+        lang_logits   : (B, n_langs)
         """
-        features = self.backbone(x)   # (B, 256, 16, 16)
-        features = self.pool(features) # (B, 256)
+        features = self.backbone(x)          # (B, 1280, H', W')
+        features = self.pool(features)       # (B, 1280, 1, 1)
+        features = features.flatten(1)       # (B, 1280)
         features = self.dropout(features)
 
         return self.letter_head(features), self.lang_head(features)
@@ -197,46 +168,39 @@ class AudioLetterClassifier(nn.Module):
     def predict(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Convenience method for inference: returns class indices directly.
-
-        Parameters
-        ----------
-        x : torch.Tensor, shape (B, 1, 128, 128)
-
-        Returns
-        -------
-        letter_preds : torch.Tensor, shape (B,) — letter class indices
-        lang_preds   : torch.Tensor, shape (B,) — language class indices
-        """
+        """Inferencia: devuelve índices de clase directamente."""
         self.eval()
         with torch.no_grad():
             letter_logits, lang_logits = self.forward(x)
         return letter_logits.argmax(dim=-1), lang_logits.argmax(dim=-1)
 
     def count_parameters(self) -> int:
-        """Return the total number of trainable parameters."""
+        """Parámetros entrenables totales."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
+    def count_trainable_vs_total(self) -> tuple[int, int]:
+        """Devuelve (entrenables, total) — útil para ver qué está congelado."""
+        total     = sum(p.numel() for p in self.parameters())
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return trainable, total
 
-# ── Loss function ─────────────────────────────────────────────────────────────
+
+# ── Loss function (sin cambios) ───────────────────────────────────────────────
 
 class DualTaskLoss(nn.Module):
     """
-    Weighted sum of two CrossEntropy losses (letter + language).
+    Suma ponderada de dos CrossEntropy (letra + idioma).
 
-    Total Loss = letter_weight × CE(letter) + lang_weight × CE(language)
+    Total Loss = letter_weight × CE(letra) + lang_weight × CE(idioma)
 
     Parameters
     ----------
     letter_weight : float
-        Weight for the letter prediction loss. Higher = more gradient
-        towards letter accuracy. Default 0.7 (primary task).
+        Peso de la loss de letra (tarea principal). Default 0.7.
     lang_weight : float
-        Weight for the language prediction loss. Default 0.3 (auxiliary task).
+        Peso de la loss de idioma (tarea auxiliar). Default 0.3.
     label_smoothing : float
-        Fraction of probability mass to spread across wrong classes.
-        Prevents overconfident predictions; 0.1 is a good default.
+        Suavizado de etiquetas para evitar predicciones sobreconfiadas.
     """
 
     def __init__(
@@ -249,8 +213,12 @@ class DualTaskLoss(nn.Module):
         self.letter_weight = letter_weight
         self.lang_weight   = lang_weight
 
-        self.letter_criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
-        self.lang_criterion   = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+        self.letter_criterion = nn.CrossEntropyLoss(
+            label_smoothing=label_smoothing
+        )
+        self.lang_criterion = nn.CrossEntropyLoss(
+            label_smoothing=label_smoothing
+        )
 
     def forward(
         self,
@@ -260,20 +228,11 @@ class DualTaskLoss(nn.Module):
         lang_targets: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Parameters
-        ----------
-        letter_logits   : (B, n_letters)
-        lang_logits     : (B, n_langs)
-        letter_targets  : (B,) int64
-        lang_targets    : (B,) int64
-
         Returns
         -------
-        total_loss   : scalar tensor
-        letter_loss  : scalar tensor  (for logging)
-        lang_loss    : scalar tensor  (for logging)
+        total_loss, letter_loss, lang_loss  — todos escalares
         """
-        l_loss = self.letter_criterion(letter_logits, letter_targets)
-        la_loss = self.lang_criterion(lang_logits,   lang_targets)
+        l_loss  = self.letter_criterion(letter_logits, letter_targets)
+        la_loss = self.lang_criterion(lang_logits,     lang_targets)
         total   = self.letter_weight * l_loss + self.lang_weight * la_loss
         return total, l_loss, la_loss

@@ -243,33 +243,23 @@ def train(args: argparse.Namespace) -> None:
     save_label_maps("./data/label_maps.json")
 
     # ── Modelo ────────────────────────────────────────────────────────────────
-    print("\n── Inicializando modelo ─────────────────────────────────")
+    print("\n── Inicializando modelo (EfficientNet-B0 + transfer learning) ──")
     model = AudioLetterClassifier(
         n_letters=args.n_letters,
         n_langs=args.n_langs,
         dropout=args.dropout,
+        freeze_backbone=True,   # Fase 1: solo entrenar las cabezas
     ).to(device)
-    print(f"Parámetros entrenables: {model.count_parameters():,}")
 
-    # ── Pérdida, optimizador y scheduler ─────────────────────────────────────
+    trainable, total = model.count_trainable_vs_total()
+    print(f"Parámetros entrenables : {trainable:,} / {total:,}  "
+          f"({100*trainable/total:.1f}%)")
+
+    # ── Pérdida ───────────────────────────────────────────────────────────────
     criterion = DualTaskLoss(
         letter_weight=args.letter_weight,
         lang_weight=args.lang_weight,
         label_smoothing=args.label_smoothing,
-    )
-
-    optimizer = AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
-
-    # CosineAnnealingLR: reduce el LR suavemente hasta eta_min a lo largo de
-    # todas las épocas. Favorece convergencia final más estable que StepLR.
-    scheduler = CosineAnnealingLR(
-        optimizer,
-        T_max=args.epochs,
-        eta_min=args.lr * 0.01,  # LR mínimo = 1% del inicial
     )
 
     # ── Preparar checkpoint ───────────────────────────────────────────────────
@@ -277,33 +267,37 @@ def train(args: argparse.Namespace) -> None:
     best_val_acc   = 0.0
     best_ckpt_path = os.path.join(args.checkpoint_dir, "best_model.pt")
     last_ckpt_path = os.path.join(args.checkpoint_dir, "last_model.pt")
+    history        = []
 
-    history = []  # lista de dicts con métricas por época
+    # ══════════════════════════════════════════════════════════════════════════
+    # FASE 1: backbone congelado — solo entrenar las cabezas
+    # LR alto, pocas épocas. Las cabezas aprenden a usar los features del
+    # backbone sin destruir los pesos pre-entrenados.
+    # ══════════════════════════════════════════════════════════════════════════
+    phase1_epochs = args.phase1_epochs
+    print(f"\n── FASE 1: cabezas solamente ({phase1_epochs} épocas) ───────────")
+    print(f"   LR: {args.lr}  |  Backbone: CONGELADO\n")
 
-    print(f"\n── Entrenamiento: {args.epochs} épocas ──────────────────────")
-    print(f"   LR inicial   : {args.lr}")
-    print(f"   Batch size   : {args.batch_size}")
-    print(f"   Augment prob : {args.augment_prob}")
-    print(f"   Checkpoints  : {args.checkpoint_dir}/\n")
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
+    scheduler = CosineAnnealingLR(
+        optimizer, T_max=phase1_epochs, eta_min=args.lr * 0.1
+    )
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(1, phase1_epochs + 1):
         t0 = time.time()
-
-        # ── Entrenamiento ─────────────────────────────────────────────────────
         train_metrics = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch
         )
-
-        # ── Validación ────────────────────────────────────────────────────────
         val_metrics = validate(model, val_loader, criterion, device)
-
         scheduler.step()
-
         elapsed = time.time() - t0
 
-        # ── Log de época ──────────────────────────────────────────────────────
         print(
-            f"Época {epoch:03d}/{args.epochs}  [{format_time(elapsed)}]  "
+            f"F1 · Época {epoch:02d}/{phase1_epochs}  [{format_time(elapsed)}]  "
             f"LR={scheduler.get_last_lr()[0]:.2e}\n"
             f"  TRAIN → loss={train_metrics['loss_total']:.4f}  "
             f"acc_letter={train_metrics['acc_letter']:.4f}  "
@@ -313,24 +307,76 @@ def train(args: argparse.Namespace) -> None:
             f"acc_lang={val_metrics['acc_lang']:.4f}"
         )
 
-        # ── Guardar mejor modelo ──────────────────────────────────────────────
-        is_best = val_metrics["loss_total"] < best_val_loss
-        if is_best:
+        if val_metrics["loss_total"] < best_val_loss:
             best_val_loss = val_metrics["loss_total"]
             best_val_acc  = val_metrics["acc_letter"]
             save_checkpoint(model, optimizer, epoch, val_metrics, best_ckpt_path)
-            print(f"  ✓ Nuevo mejor modelo guardado (val_loss={best_val_loss:.4f})")
+            print(f"  ✓ Mejor modelo guardado (val_loss={best_val_loss:.4f})")
 
-        # Checkpoint de la última época (útil para reanudar)
         save_checkpoint(model, optimizer, epoch, val_metrics, last_ckpt_path)
-
-        # Historial
         history.append({
-            "epoch": epoch,
-            "lr":    scheduler.get_last_lr()[0],
+            "epoch": epoch, "phase": 1,
+            "lr": scheduler.get_last_lr()[0],
             **{f"train_{k}": v for k, v in train_metrics.items()},
             **{f"val_{k}":   v for k, v in val_metrics.items()},
         })
+        print()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # FASE 2: fine-tuning completo — descongelar backbone
+    # LR mucho más bajo para no destruir los pesos pre-entrenados.
+    # ══════════════════════════════════════════════════════════════════════════
+    phase2_epochs = args.epochs - phase1_epochs
+    if phase2_epochs > 0:
+        model.unfreeze_backbone()
+        trainable, total = model.count_trainable_vs_total()
+        print(f"\n── FASE 2: fine-tuning completo ({phase2_epochs} épocas) ──────")
+        print(f"   LR: {args.lr_phase2}  |  Backbone: DESCONGELADO")
+        print(f"   Parámetros entrenables: {trainable:,} / {total:,}\n")
+
+        optimizer = AdamW(
+            model.parameters(),
+            lr=args.lr_phase2,
+            weight_decay=args.weight_decay,
+        )
+        scheduler = CosineAnnealingLR(
+            optimizer, T_max=phase2_epochs, eta_min=args.lr_phase2 * 0.01
+        )
+
+        for epoch in range(phase1_epochs + 1, args.epochs + 1):
+            t0 = time.time()
+            train_metrics = train_one_epoch(
+                model, train_loader, criterion, optimizer, device, epoch
+            )
+            val_metrics = validate(model, val_loader, criterion, device)
+            scheduler.step()
+            elapsed = time.time() - t0
+
+            print(
+                f"F2 · Época {epoch:02d}/{args.epochs}  [{format_time(elapsed)}]  "
+                f"LR={scheduler.get_last_lr()[0]:.2e}\n"
+                f"  TRAIN → loss={train_metrics['loss_total']:.4f}  "
+                f"acc_letter={train_metrics['acc_letter']:.4f}  "
+                f"acc_lang={train_metrics['acc_lang']:.4f}\n"
+                f"  VAL   → loss={val_metrics['loss_total']:.4f}  "
+                f"acc_letter={val_metrics['acc_letter']:.4f}  "
+                f"acc_lang={val_metrics['acc_lang']:.4f}"
+            )
+
+            if val_metrics["loss_total"] < best_val_loss:
+                best_val_loss = val_metrics["loss_total"]
+                best_val_acc  = val_metrics["acc_letter"]
+                save_checkpoint(model, optimizer, epoch, val_metrics, best_ckpt_path)
+                print(f"  ✓ Mejor modelo guardado (val_loss={best_val_loss:.4f})")
+
+            save_checkpoint(model, optimizer, epoch, val_metrics, last_ckpt_path)
+            history.append({
+                "epoch": epoch, "phase": 2,
+                "lr": scheduler.get_last_lr()[0],
+                **{f"train_{k}": v for k, v in train_metrics.items()},
+                **{f"val_{k}":   v for k, v in val_metrics.items()},
+            })
+            print()
 
         print()
 
@@ -385,14 +431,19 @@ def parse_args() -> argparse.Namespace:
                    help="Dropout antes de las cabezas de clasificación")
 
     # Entrenamiento
-    p.add_argument("--epochs",       type=int,   default=60)
-    p.add_argument("--batch_size",   type=int,   default=32)
-    p.add_argument("--lr",           type=float, default=1e-3,
-                   help="Learning rate inicial para AdamW")
-    p.add_argument("--weight_decay", type=float, default=1e-4,
+    p.add_argument("--epochs",        type=int,   default=60,
+                   help="Épocas totales (Fase 1 + Fase 2)")
+    p.add_argument("--phase1_epochs", type=int,   default=10,
+                   help="Épocas de Fase 1 (backbone congelado, solo cabezas)")
+    p.add_argument("--batch_size",    type=int,   default=32)
+    p.add_argument("--lr",            type=float, default=1e-3,
+                   help="LR para Fase 1 (cabezas solamente)")
+    p.add_argument("--lr_phase2",     type=float, default=1e-4,
+                   help="LR para Fase 2 (fine-tuning completo, debe ser ~10x menor)")
+    p.add_argument("--weight_decay",  type=float, default=1e-4,
                    help="Weight decay (L2) de AdamW")
-    p.add_argument("--augment_prob", type=float, default=0.8,
-                   help="Probabilidad de aplicar augmentación en training")
+    p.add_argument("--augment_prob",  type=float, default=0.0,
+                   help="Prob. augmentación online (pon 0.0 si ya usaste offline_augment.py)")
 
     # Pérdida
     p.add_argument("--letter_weight",   type=float, default=0.7,
