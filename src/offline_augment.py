@@ -75,9 +75,12 @@ def generate_augmented_dataset(
     data_dir = Path(data_dir)
     stats = {"original": 0, "generated": 0, "skipped": 0, "failed": 0}
 
-    # Recoger solo ficheros originales (sin _aug_ en el nombre)
-    all_npy = sorted(data_dir.rglob("*.npy"))
-    originals = [f for f in all_npy if "_aug_" not in f.stem]
+    # Buscar todos los .npy originales directamente en data_dir
+    # (sin subcarpetas english/ ni spanish/ — el idioma va en el nombre del fichero)
+    originals = [
+        f for f in sorted(data_dir.rglob("*.npy"))
+        if "_aug_" not in f.stem
+    ]
 
     if not originals:
         print(f"No se encontraron ficheros .npy en '{data_dir}'.")

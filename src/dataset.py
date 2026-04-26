@@ -121,10 +121,13 @@ class AlphaSoundDataset(Dataset):
         """
         Recorre root_dir buscando ficheros .npy.
 
-        La letra se extrae del primer carácter del nombre de fichero
-        (ej: 'a_EN_1.npy' → letra = 'a').
-        El idioma se extrae del nombre de la carpeta padre
-        (ej: carpeta 'english' → lang_idx = 0).
+        Tanto la letra como el idioma se extraen del nombre del fichero:
+          • Letra   → primer carácter del stem  (ej: 'a_EN_1.npy' → 'a')
+          • Idioma  → '_EN_' en el nombre → english (0)
+                      '_ES_' en el nombre → spanish (1)
+
+        Funciona con ficheros en cualquier nivel bajo root_dir, sin necesitar
+        subcarpetas english/ o spanish/.
 
         Devuelve
         --------
@@ -132,26 +135,28 @@ class AlphaSoundDataset(Dataset):
         """
         samples = []
 
-        for lang_dir in sorted(self.root_dir.iterdir()):
-            if not lang_dir.is_dir():
-                continue
-            lang_name = lang_dir.name.lower()
-            if lang_name not in LANGUAGE_TO_IDX:
-                continue
-            lang_idx = LANGUAGE_TO_IDX[lang_name]
+        for npy_file in sorted(self.root_dir.rglob("*.npy")):
+            stem = npy_file.stem  # ej: 'a_EN_1' o 'a_EN_1_aug_01'
 
-            for npy_file in sorted(lang_dir.rglob("*.npy")):
-                # El primer carácter del nombre es la letra
-                letter = npy_file.stem[0].lower()
-                if letter not in LETTER_TO_IDX:
-                    continue  # ignora letras fuera del vocabulario (ñ, etc.)
-                letter_idx = LETTER_TO_IDX[letter]
+            # ── Letra: primer carácter ────────────────────────────────────────
+            letter = stem[0].lower()
+            if letter not in LETTER_TO_IDX:
+                continue  # ignora letras fuera del vocabulario
 
-                samples.append({
-                    "path":       str(npy_file),
-                    "letter_idx": letter_idx,
-                    "lang_idx":   lang_idx,
-                })
+            # ── Idioma: '_EN_' o '_ES_' en el nombre ─────────────────────────
+            stem_upper = stem.upper()
+            if "_EN_" in stem_upper:
+                lang_idx = LANGUAGE_TO_IDX["english"]
+            elif "_ES_" in stem_upper:
+                lang_idx = LANGUAGE_TO_IDX["spanish"]
+            else:
+                continue  # idioma no reconocido, se omite
+
+            samples.append({
+                "path":       str(npy_file),
+                "letter_idx": LETTER_TO_IDX[letter],
+                "lang_idx":   lang_idx,
+            })
 
         return samples
 
