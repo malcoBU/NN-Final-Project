@@ -187,76 +187,99 @@ if model is None:
 st.success(f"Modelo cargado · {N_LETTERS} letras · dispositivo: `{device}`")
 st.divider()
 
-# Grabación de audio
-audio_bytes = st.audio_input("🎙️ Graba una letra")
+# ── Dos modos de entrada ──────────────────────────────────────────────────────
+tab_mic, tab_file = st.tabs(["🎙️ Grabar", "📂 Subir archivo (.ogg / .wav)"])
 
-if audio_bytes:
-    # Guardar en fichero temporal
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(audio_bytes.read())
-        tmp_path = tmp.name
+tmp_path = None
 
-    st.audio(tmp_path)
+with tab_mic:
+    audio_bytes = st.audio_input("Graba una letra")
+    if audio_bytes:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(audio_bytes.read())
+            tmp_path = tmp.name
+        st.audio(tmp_path)
 
-    if st.button("🚀 Analizar", use_container_width=True):
-        with st.spinner("Analizando audio..."):
-            try:
-                result = predict(tmp_path, model, device)
-            except Exception as e:
-                st.error(f"Error al procesar el audio: {e}")
-                st.stop()
+with tab_file:
+    uploaded = st.file_uploader(
+        "Sube un fichero de audio del dataset original",
+        type=["ogg", "wav"],
+        help="Usa un .ogg del dataset para comprobar si el modelo funciona "
+             "con los datos de entrenamiento originales.",
+    )
+    if uploaded:
+        suffix = "." + uploaded.name.split(".")[-1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(uploaded.read())
+            tmp_path = tmp.name
+        st.audio(tmp_path)
+        # Mostrar qué letra e idioma se esperan según el nombre del fichero
+        stem = uploaded.name.split(".")[0]  # ej: "a_EN_1"
+        expected_letter = stem[0].upper()
+        expected_lang   = "English" if "_EN_" in stem.upper() else \
+                          "Spanish" if "_ES_" in stem.upper() else "?"
+        st.info(f"Esperado según nombre de fichero → **{expected_letter}** · {expected_lang}")
 
-        # ── Efecto de escritura ───────────────────────────────────────────────
-        placeholder = st.empty()
-        msg = "Procesando resultados..."
-        displayed = ""
-        for char in msg:
-            displayed += char
-            placeholder.markdown(f"*{displayed}*")
-            time.sleep(0.025)
-        placeholder.empty()
+# ── Análisis (compartido por ambos modos) ────────────────────────────────────
+if tmp_path and st.button("🚀 Analizar", use_container_width=True):
+    with st.spinner("Analizando audio..."):
+        try:
+            result = predict(tmp_path, model, device)
+        except Exception as e:
+            st.error(f"Error al procesar el audio: {e}")
+            st.stop()
 
-        # ── Tarjeta de resultado principal ────────────────────────────────────
-        lang_emoji = "🇬🇧" if result["language"] == "English" else "🇪🇸"
+    # ── Efecto de escritura ───────────────────────────────────────────────
+    placeholder = st.empty()
+    msg = "Procesando resultados..."
+    displayed = ""
+    for char in msg:
+        displayed += char
+        placeholder.markdown(f"*{displayed}*")
+        time.sleep(0.025)
+    placeholder.empty()
 
-        st.markdown(
-            f"""
-            <div style="
-                padding: 28px;
-                border-radius: 16px;
-                background: linear-gradient(135deg, #667eea, #764ba2);
-                color: white;
-                text-align: center;
-                margin-bottom: 24px;
-                animation: fadeIn 0.8s ease-in-out;
-            ">
-                <h1 style="font-size: 72px; margin: 0;">{result['letter']}</h1>
-                <h3 style="margin: 8px 0;">{lang_emoji} {result['language']}</h3>
-                <p style="font-size: 16px; opacity: 0.9;">
-                    Confianza letra: <strong>{result['letter_conf']:.1%}</strong>
-                    &nbsp;·&nbsp;
-                    Confianza idioma: <strong>{result['lang_conf']:.1%}</strong>
-                </p>
-            </div>
+    # ── Tarjeta de resultado principal ───────────────────────────────────
+    lang_emoji = "🇬🇧" if result["language"] == "English" else "🇪🇸"
 
-            <style>
-            @keyframes fadeIn {{
-                from {{ opacity: 0; transform: translateY(16px); }}
-                to   {{ opacity: 1; transform: translateY(0); }}
-            }}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        f"""
+        <div style="
+            padding: 28px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            text-align: center;
+            margin-bottom: 24px;
+            animation: fadeIn 0.8s ease-in-out;
+        ">
+            <h1 style="font-size: 72px; margin: 0;">{result['letter']}</h1>
+            <h3 style="margin: 8px 0;">{lang_emoji} {result['language']}</h3>
+            <p style="font-size: 16px; opacity: 0.9;">
+                Confianza letra: <strong>{result['letter_conf']:.1%}</strong>
+                &nbsp;·&nbsp;
+                Confianza idioma: <strong>{result['lang_conf']:.1%}</strong>
+            </p>
+        </div>
 
-        # ── Gráficas ──────────────────────────────────────────────────────────
-        col1, col2 = st.columns(2)
+        <style>
+        @keyframes fadeIn {{
+            from {{ opacity: 0; transform: translateY(16px); }}
+            to   {{ opacity: 1; transform: translateY(0); }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-        with col1:
-            st.pyplot(plot_melspectrogram(result["mel"]))
+    # ── Gráficas ──────────────────────────────────────────────────────────
+    col1, col2 = st.columns(2)
 
-        with col2:
-            st.pyplot(plot_top5(result["letter_probs"]))
+    with col1:
+        st.pyplot(plot_melspectrogram(result["mel"]))
 
-        # Limpiar fichero temporal
-        os.remove(tmp_path)
+    with col2:
+        st.pyplot(plot_top5(result["letter_probs"]))
+
+    # Limpiar fichero temporal
+    os.remove(tmp_path)
