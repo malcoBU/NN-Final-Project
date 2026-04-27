@@ -61,7 +61,7 @@ class AudioLetterClassifier(nn.Module):
         self,
         n_letters: int = 27,
         n_langs: int = 2,
-        dropout: float = 0.4,
+        dropout: float = 0.1,
         freeze_backbone: bool = False,
     ):
         super().__init__()

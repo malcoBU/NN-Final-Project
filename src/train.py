@@ -243,12 +243,12 @@ def train(args: argparse.Namespace) -> None:
     save_label_maps("./data/label_maps.json")
 
     # ── Modelo ────────────────────────────────────────────────────────────────
-    print("\n── Inicializando modelo (EfficientNet-B0 + transfer learning) ──")
+    print("\n── Inicializando modelo (EfficientNet-B0, backbone congelado) ───")
     model = AudioLetterClassifier(
         n_letters=args.n_letters,
         n_langs=args.n_langs,
         dropout=args.dropout,
-        freeze_backbone=True,   # Fase 1: solo entrenar las cabezas
+        freeze_backbone=True,   # backbone siempre congelado
     ).to(device)
 
     trainable, total = model.count_trainable_vs_total()
@@ -262,6 +262,16 @@ def train(args: argparse.Namespace) -> None:
         label_smoothing=args.label_smoothing,
     )
 
+    # ── Optimizador y scheduler ───────────────────────────────────────────────
+    optimizer = AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
+    scheduler = CosineAnnealingLR(
+        optimizer, T_max=args.epochs, eta_min=args.lr * 0.01
+    )
+
     # ── Preparar checkpoint ───────────────────────────────────────────────────
     best_val_loss  = float("inf")
     best_val_acc   = 0.0
@@ -269,25 +279,14 @@ def train(args: argparse.Namespace) -> None:
     last_ckpt_path = os.path.join(args.checkpoint_dir, "last_model.pt")
     history        = []
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # FASE 1: backbone congelado — solo entrenar las cabezas
-    # LR alto, pocas épocas. Las cabezas aprenden a usar los features del
-    # backbone sin destruir los pesos pre-entrenados.
-    # ══════════════════════════════════════════════════════════════════════════
-    phase1_epochs = args.phase1_epochs
-    print(f"\n── FASE 1: cabezas solamente ({phase1_epochs} épocas) ───────────")
-    print(f"   LR: {args.lr}  |  Backbone: CONGELADO\n")
+    print(f"\n── Entrenamiento: {args.epochs} épocas ──────────────────────────")
+    print(f"   LR            : {args.lr}")
+    print(f"   Batch size    : {args.batch_size}")
+    print(f"   Dropout       : {args.dropout}")
+    print(f"   Label smooth  : {args.label_smoothing}")
+    print(f"   Backbone      : CONGELADO (sin fase 2)\n")
 
-    optimizer = AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
-    scheduler = CosineAnnealingLR(
-        optimizer, T_max=phase1_epochs, eta_min=args.lr * 0.1
-    )
-
-    for epoch in range(1, phase1_epochs + 1):
+    for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         train_metrics = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch
@@ -297,7 +296,7 @@ def train(args: argparse.Namespace) -> None:
         elapsed = time.time() - t0
 
         print(
-            f"F1 · Época {epoch:02d}/{phase1_epochs}  [{format_time(elapsed)}]  "
+            f"Época {epoch:02d}/{args.epochs}  [{format_time(elapsed)}]  "
             f"LR={scheduler.get_last_lr()[0]:.2e}\n"
             f"  TRAIN → loss={train_metrics['loss_total']:.4f}  "
             f"acc_letter={train_metrics['acc_letter']:.4f}  "
@@ -315,69 +314,11 @@ def train(args: argparse.Namespace) -> None:
 
         save_checkpoint(model, optimizer, epoch, val_metrics, last_ckpt_path)
         history.append({
-            "epoch": epoch, "phase": 1,
+            "epoch": epoch,
             "lr": scheduler.get_last_lr()[0],
             **{f"train_{k}": v for k, v in train_metrics.items()},
             **{f"val_{k}":   v for k, v in val_metrics.items()},
         })
-        print()
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # FASE 2: fine-tuning completo — descongelar backbone
-    # LR mucho más bajo para no destruir los pesos pre-entrenados.
-    # ══════════════════════════════════════════════════════════════════════════
-    phase2_epochs = args.epochs - phase1_epochs
-    if phase2_epochs > 0:
-        model.unfreeze_backbone()
-        trainable, total = model.count_trainable_vs_total()
-        print(f"\n── FASE 2: fine-tuning completo ({phase2_epochs} épocas) ──────")
-        print(f"   LR: {args.lr_phase2}  |  Backbone: DESCONGELADO")
-        print(f"   Parámetros entrenables: {trainable:,} / {total:,}\n")
-
-        optimizer = AdamW(
-            model.parameters(),
-            lr=args.lr_phase2,
-            weight_decay=args.weight_decay,
-        )
-        scheduler = CosineAnnealingLR(
-            optimizer, T_max=phase2_epochs, eta_min=args.lr_phase2 * 0.01
-        )
-
-        for epoch in range(phase1_epochs + 1, args.epochs + 1):
-            t0 = time.time()
-            train_metrics = train_one_epoch(
-                model, train_loader, criterion, optimizer, device, epoch
-            )
-            val_metrics = validate(model, val_loader, criterion, device)
-            scheduler.step()
-            elapsed = time.time() - t0
-
-            print(
-                f"F2 · Época {epoch:02d}/{args.epochs}  [{format_time(elapsed)}]  "
-                f"LR={scheduler.get_last_lr()[0]:.2e}\n"
-                f"  TRAIN → loss={train_metrics['loss_total']:.4f}  "
-                f"acc_letter={train_metrics['acc_letter']:.4f}  "
-                f"acc_lang={train_metrics['acc_lang']:.4f}\n"
-                f"  VAL   → loss={val_metrics['loss_total']:.4f}  "
-                f"acc_letter={val_metrics['acc_letter']:.4f}  "
-                f"acc_lang={val_metrics['acc_lang']:.4f}"
-            )
-
-            if val_metrics["loss_total"] < best_val_loss:
-                best_val_loss = val_metrics["loss_total"]
-                best_val_acc  = val_metrics["acc_letter"]
-                save_checkpoint(model, optimizer, epoch, val_metrics, best_ckpt_path)
-                print(f"  ✓ Mejor modelo guardado (val_loss={best_val_loss:.4f})")
-
-            save_checkpoint(model, optimizer, epoch, val_metrics, last_ckpt_path)
-            history.append({
-                "epoch": epoch, "phase": 2,
-                "lr": scheduler.get_last_lr()[0],
-                **{f"train_{k}": v for k, v in train_metrics.items()},
-                **{f"val_{k}":   v for k, v in val_metrics.items()},
-            })
-            print()
-
         print()
 
     # ── Resumen final ─────────────────────────────────────────────────────────
@@ -427,31 +368,22 @@ def parse_args() -> argparse.Namespace:
                    help="Número de clases de letras")
     p.add_argument("--n_langs",    type=int,   default=2,
                    help="Número de clases de idioma")
-    p.add_argument("--dropout",    type=float, default=0.5,
-                   help="Dropout antes de las cabezas de clasificación")
+    p.add_argument("--dropout",    type=float, default=0.1,
+                   help="Dropout antes de las cabezas (reducido para no bloquear el aprendizaje)")
 
     # Entrenamiento
-    p.add_argument("--epochs",        type=int,   default=60,
-                   help="Épocas totales (Fase 1 + Fase 2)")
-    p.add_argument("--phase1_epochs", type=int,   default=10,
-                   help="Épocas de Fase 1 (backbone congelado, solo cabezas)")
-    p.add_argument("--batch_size",    type=int,   default=32)
-    p.add_argument("--lr",            type=float, default=1e-3,
-                   help="LR para Fase 1 (cabezas solamente)")
-    p.add_argument("--lr_phase2",     type=float, default=1e-4,
-                   help="LR para Fase 2 (fine-tuning completo, debe ser ~10x menor)")
-    p.add_argument("--weight_decay",  type=float, default=1e-4,
-                   help="Weight decay (L2) de AdamW")
-    p.add_argument("--augment_prob",  type=float, default=0.0,
-                   help="Prob. augmentación online (pon 0.0 si ya usaste offline_augment.py)")
+    p.add_argument("--epochs",       type=int,   default=60)
+    p.add_argument("--batch_size",   type=int,   default=32)
+    p.add_argument("--lr",           type=float, default=1e-3)
+    p.add_argument("--weight_decay", type=float, default=1e-4)
+    p.add_argument("--augment_prob", type=float, default=0.0,
+                   help="Prob. augmentación online (0.0 si ya usaste offline_augment.py)")
 
     # Pérdida
-    p.add_argument("--letter_weight",   type=float, default=0.7,
-                   help="Peso de la pérdida de letra en la loss total")
-    p.add_argument("--lang_weight",     type=float, default=0.3,
-                   help="Peso de la pérdida de idioma en la loss total")
-    p.add_argument("--label_smoothing", type=float, default=0.1,
-                   help="Label smoothing para CrossEntropyLoss")
+    p.add_argument("--letter_weight",   type=float, default=0.7)
+    p.add_argument("--lang_weight",     type=float, default=0.3)
+    p.add_argument("--label_smoothing", type=float, default=0.0,
+                   help="Label smoothing (0.0 = sin suavizado, señal de gradiente limpia)")
 
     return p.parse_args()
 
