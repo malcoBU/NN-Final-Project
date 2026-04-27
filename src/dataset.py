@@ -93,47 +93,55 @@ class AlphaSoundDataset(Dataset):
         self.augment_prob = augment_prob if split == "train" else 0.0
         self.normalize    = normalize
 
-        all_samples = self._scan_directory()
+        # ── Split sin data leakage ────────────────────────────────────────────
+        # 1. Separar originales y aumentados
+        originals, augmented = self._scan_directory()
 
-        if not all_samples:
+        if not originals:
             raise RuntimeError(
-                f"No se encontraron ficheros .npy bajo '{root_dir}'.\n"
-                "Comprueba que la estructura es: root/english/*.npy y root/spanish/*.npy"
+                f"No se encontraron ficheros .npy bajo '{root_dir}'."
             )
 
-        # Shuffle reproducible + split
+        # 2. Dividir SOLO los originales en train/val/test
         random.seed(seed)
-        random.shuffle(all_samples)
-        n       = len(all_samples)
+        random.shuffle(originals)
+        n       = len(originals)
         n_train = int(n * split_ratios[0])
         n_val   = int(n * split_ratios[1])
 
+        orig_train = originals[:n_train]
+        orig_val   = originals[n_train : n_train + n_val]
+        orig_test  = originals[n_train + n_val :]
+
+        # 3. Los aumentados van SOLO a training — nunca a val ni test
+        #    Así se evita el leakage: val/test solo ven audios originales
+        #    que el modelo nunca ha visto durante el entrenamiento.
         if split == "train":
-            self.samples = all_samples[:n_train]
+            self.samples = orig_train + augmented
         elif split == "val":
-            self.samples = all_samples[n_train : n_train + n_val]
+            self.samples = orig_val
         else:
-            self.samples = all_samples[n_train + n_val :]
+            self.samples = orig_test
 
     # ── Helpers internos ──────────────────────────────────────────────────────
 
-    def _scan_directory(self) -> list[dict]:
+    def _scan_directory(self) -> tuple[list[dict], list[dict]]:
         """
-        Recorre root_dir buscando ficheros .npy.
+        Recorre root_dir buscando ficheros .npy y los separa en dos listas:
+        originales y aumentados (_aug_).
 
         Tanto la letra como el idioma se extraen del nombre del fichero:
           • Letra   → primer carácter del stem  (ej: 'a_EN_1.npy' → 'a')
           • Idioma  → '_EN_' en el nombre → english (0)
                       '_ES_' en el nombre → spanish (1)
 
-        Funciona con ficheros en cualquier nivel bajo root_dir, sin necesitar
-        subcarpetas english/ o spanish/.
-
         Devuelve
         --------
-        list de dicts {"path": str, "letter_idx": int, "lang_idx": int}
+        (originals, augmented) — dos listas de dicts
+            {"path": str, "letter_idx": int, "lang_idx": int}
         """
-        samples = []
+        originals = []
+        augmented = []
 
         for npy_file in sorted(self.root_dir.rglob("*.npy")):
             stem = npy_file.stem  # ej: 'a_EN_1' o 'a_EN_1_aug_01'
@@ -152,13 +160,18 @@ class AlphaSoundDataset(Dataset):
             else:
                 continue  # idioma no reconocido, se omite
 
-            samples.append({
+            entry = {
                 "path":       str(npy_file),
                 "letter_idx": LETTER_TO_IDX[letter],
                 "lang_idx":   lang_idx,
-            })
+            }
 
-        return samples
+            if "_aug_" in stem:
+                augmented.append(entry)
+            else:
+                originals.append(entry)
+
+        return originals, augmented
 
     # ── Interfaz PyTorch ──────────────────────────────────────────────────────
 
