@@ -93,8 +93,16 @@ class AlphaSoundDataset(Dataset):
         self.augment_prob = augment_prob if split == "train" else 0.0
         self.normalize    = normalize
 
-        # ── Split sin data leakage ────────────────────────────────────────────
-        # 1. Separar originales y aumentados
+        # ── Split por hablante (speaker-level split) ──────────────────────────
+        # Con pocos hablantes, dividir por muestra da métricas falsas porque
+        # el modelo ve las mismas voces en train y val.
+        # La única forma de medir generalización real es reservar hablantes
+        # enteros para val/test — voces que el modelo nunca ha oído.
+        #
+        # Ejemplo con 10 hablantes y ratios 70/15/15:
+        #   Train → hablantes 1–7   (+ todos sus aumentados)
+        #   Val   → hablantes 8–9   (solo originales)
+        #   Test  → hablante  10    (solo originales)
         originals, augmented = self._scan_directory()
 
         if not originals:
@@ -102,43 +110,74 @@ class AlphaSoundDataset(Dataset):
                 f"No se encontraron ficheros .npy bajo '{root_dir}'."
             )
 
-        # 2. Dividir SOLO los originales en train/val/test
+        # 1. Obtener IDs de hablante únicos y ordenados
+        all_speakers = sorted(set(s["speaker_id"] for s in originals))
+        n_speakers   = len(all_speakers)
+
+        # 2. Dividir IDs de hablante en train/val/test
         random.seed(seed)
-        random.shuffle(originals)
-        n       = len(originals)
-        n_train = int(n * split_ratios[0])
-        n_val   = int(n * split_ratios[1])
+        speakers_shuffled = all_speakers.copy()
+        random.shuffle(speakers_shuffled)
 
-        orig_train = originals[:n_train]
-        orig_val   = originals[n_train : n_train + n_val]
-        orig_test  = originals[n_train + n_val :]
+        n_train_spk = max(1, int(n_speakers * split_ratios[0]))
+        n_val_spk   = max(1, int(n_speakers * split_ratios[1]))
 
-        # 3. Los aumentados van SOLO a training — nunca a val ni test
-        #    Así se evita el leakage: val/test solo ven audios originales
-        #    que el modelo nunca ha visto durante el entrenamiento.
+        train_speakers = set(speakers_shuffled[:n_train_spk])
+        val_speakers   = set(speakers_shuffled[n_train_spk : n_train_spk + n_val_spk])
+        test_speakers  = set(speakers_shuffled[n_train_spk + n_val_spk :])
+
+        # Si no sobran hablantes para test, los últimos de val pasan a test
+        if not test_speakers and len(val_speakers) > 1:
+            last_val = sorted(val_speakers)[-1]
+            val_speakers.remove(last_val)
+            test_speakers.add(last_val)
+
+        # 3. Asignar muestras al split correspondiente
+        #    Aumentados: solo al split de train, y solo si su hablante es de train
         if split == "train":
-            self.samples = orig_train + augmented
+            orig_split = [s for s in originals if s["speaker_id"] in train_speakers]
+            aug_split  = [s for s in augmented if s["speaker_id"] in train_speakers]
+            self.samples = orig_split + aug_split
         elif split == "val":
-            self.samples = orig_val
+            self.samples = [s for s in originals if s["speaker_id"] in val_speakers]
         else:
-            self.samples = orig_test
+            self.samples = [s for s in originals if s["speaker_id"] in test_speakers]
+
+        # Log informativo
+        if split == "train":
+            print(f"  Hablantes train : {sorted(train_speakers)}")
+            print(f"  Hablantes val   : {sorted(val_speakers)}")
+            print(f"  Hablantes test  : {sorted(test_speakers)}")
 
     # ── Helpers internos ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_speaker_id(stem: str) -> str:
+        """
+        Extrae el ID del hablante del nombre del fichero.
+
+        Formato esperado: letra_IDIOMA_speaker  (ej: 'a_EN_1', 'z_ES_10')
+        Para aumentados:  letra_IDIOMA_speaker_aug_N  (ej: 'a_EN_1_aug_03')
+
+        Devuelve el ID como string (ej: '1', '10').
+        """
+        base = stem.split("_aug_")[0]   # quitar sufijo de augmentación si existe
+        return base.split("_")[-1]      # último segmento = ID del hablante
 
     def _scan_directory(self) -> tuple[list[dict], list[dict]]:
         """
         Recorre root_dir buscando ficheros .npy y los separa en dos listas:
         originales y aumentados (_aug_).
 
-        Tanto la letra como el idioma se extraen del nombre del fichero:
-          • Letra   → primer carácter del stem  (ej: 'a_EN_1.npy' → 'a')
-          • Idioma  → '_EN_' en el nombre → english (0)
-                      '_ES_' en el nombre → spanish (1)
+        Extrae letra, idioma y speaker_id del nombre del fichero:
+          • Letra      → primer carácter  (ej: 'a_EN_1.npy' → 'a')
+          • Idioma     → '_EN_' → english (0), '_ES_' → spanish (1)
+          • Speaker ID → último número    (ej: 'a_EN_1.npy' → '1')
 
         Devuelve
         --------
         (originals, augmented) — dos listas de dicts
-            {"path": str, "letter_idx": int, "lang_idx": int}
+            {"path": str, "letter_idx": int, "lang_idx": int, "speaker_id": str}
         """
         originals = []
         augmented = []
@@ -149,7 +188,7 @@ class AlphaSoundDataset(Dataset):
             # ── Letra: primer carácter ────────────────────────────────────────
             letter = stem[0].lower()
             if letter not in LETTER_TO_IDX:
-                continue  # ignora letras fuera del vocabulario
+                continue
 
             # ── Idioma: '_EN_' o '_ES_' en el nombre ─────────────────────────
             stem_upper = stem.upper()
@@ -158,12 +197,16 @@ class AlphaSoundDataset(Dataset):
             elif "_ES_" in stem_upper:
                 lang_idx = LANGUAGE_TO_IDX["spanish"]
             else:
-                continue  # idioma no reconocido, se omite
+                continue
+
+            # ── Speaker ID ────────────────────────────────────────────────────
+            speaker_id = self._extract_speaker_id(stem)
 
             entry = {
                 "path":       str(npy_file),
                 "letter_idx": LETTER_TO_IDX[letter],
                 "lang_idx":   lang_idx,
+                "speaker_id": speaker_id,
             }
 
             if "_aug_" in stem:
