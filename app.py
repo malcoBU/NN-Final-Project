@@ -280,15 +280,6 @@ if temp_path and st.button("🚀 Analyze", use_container_width=True):
         """,
         unsafe_allow_html=True,
     )
-        <style>
-        @keyframes fadeIn {{
-            from {{ opacity: 0; transform: translateY(16px); }}
-            to   {{ opacity: 1; transform: translateY(0); }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
 
     # ── Charts ────────────────────────────────────────────────────────────
     col1, col2 = st.columns(2)
