@@ -1,17 +1,17 @@
 """
 app.py
 ------
-Interfaz Streamlit para inferencia en tiempo real con el modelo AlphaSound.
+Streamlit interface for real-time inference with the AlphaSound model.
 
-Uso
----
-    # Desde la raíz del proyecto, con el entorno virtual activado:
+Usage
+-----
+    # From the project root, with the virtual environment activated:
     streamlit run app.py
 
-Requiere
+Requires
 --------
     pip install streamlit
-    (el resto de dependencias ya están instaladas)
+    (the rest of the dependencies are already installed)
 """
 
 import sys
@@ -25,15 +25,15 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import streamlit as st
 
-# Añadir src/ al path para importar los módulos del proyecto
+# Add src/ to the path to import project modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from preprocess import load_and_preprocess
-from features   import extract_features, normalize_spectrogram
-from model      import AudioLetterClassifier
-from dataset    import IDX_TO_LETTER, IDX_TO_LANG, ALL_LETTERS
+from features import extract_features, normalize_spectrogram
+from model import AudioLetterClassifier
+from dataset import IDX_TO_LETTER, IDX_TO_LANG, ALL_LETTERS
 
-# ── Configuración de página ───────────────────────────────────────────────────
+# ── Page configuration ───────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="AlphaSound Demo",
@@ -41,19 +41,19 @@ st.set_page_config(
     layout="centered",
 )
 
-# ── Carga del modelo (cacheado para no recargar en cada interacción) ──────────
+# ── Model loading (cached to avoid reloading on every interaction) ──────────
 
 CHECKPOINT_PATH = "checkpoints/best_model.pt"
-N_LETTERS       = len(ALL_LETTERS)   # 27 (a–z + ñ)
-N_LANGS         = 2
+N_LETTERS = len(ALL_LETTERS)   # 27 (a–z + ñ)
+N_LANGS = 2
 
 
 @st.cache_resource
 def load_model():
-    """Carga el modelo entrenado una sola vez y lo mantiene en memoria."""
+    """Load the trained model once and keep it in memory."""
     device = (
         torch.device("cuda") if torch.cuda.is_available() else
-        torch.device("mps")  if torch.backends.mps.is_available() else
+        torch.device("mps") if torch.backends.mps.is_available() else
         torch.device("cpu")
     )
 
@@ -63,65 +63,65 @@ def load_model():
     )
 
     if not os.path.exists(CHECKPOINT_PATH):
-        return None, device  # modelo aún no entrenado
+        return None, device  # model not trained yet
 
-    ckpt = torch.load(CHECKPOINT_PATH, map_location=device)
-    model.load_state_dict(ckpt["model_state"])
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+    model.load_state_dict(checkpoint["model_state"])
     model.to(device)
     model.eval()
     return model, device
 
 
-# ── Pipeline de inferencia ────────────────────────────────────────────────────
+# ── Inference pipeline ───────────────────────────────────────────────────────
 
 def predict(audio_path: str, model, device) -> dict:
     """
-    Pipeline completo: audio → waveform → mel-spectrogram → modelo → resultado.
+    Full pipeline: audio → waveform → mel-spectrogram → model → result.
 
-    Devuelve
-    --------
-    dict con:
-        letter        : str   — letra predicha
-        language      : str   — idioma predicho
-        letter_conf   : float — confianza de la letra (0–1)
-        lang_conf     : float — confianza del idioma (0–1)
-        letter_probs  : np.ndarray (N_LETTERS,) — probabilidades de todas las letras
-        mel           : np.ndarray (128, 128)   — espectrograma para visualizar
+    Returns
+    -------
+    dict with:
+        letter        : str   — predicted letter
+        language      : str   — predicted language
+        letter_conf   : float — letter confidence (0–1)
+        lang_conf     : float — language confidence (0–1)
+        letter_probs  : np.ndarray (N_LETTERS,) — probabilities for all letters
+        mel           : np.ndarray (128, 128)   — spectrogram for visualization
     """
-    # 1. Cargar y preprocesar waveform
-    y = load_and_preprocess(audio_path)
+    # 1. Load and preprocess waveform
+    waveform = load_and_preprocess(audio_path)
 
-    # 2. Extraer mel-spectrogram
-    mel = extract_features(y)               # (1, 128, 128)
-    mel_norm = normalize_spectrogram(mel)   # (1, 128, 128)
+    # 2. Extract mel-spectrogram
+    mel = extract_features(waveform)             # (1, 128, 128)
+    mel_normalized = normalize_spectrogram(mel)  # (1, 128, 128)
 
-    # 3. Convertir a tensor y añadir dimensión de batch → (1, 1, 128, 128)
-    tensor = torch.from_numpy(mel_norm).unsqueeze(0).to(device)
+    # 3. Convert to tensor and add batch dimension → (1, 1, 128, 128)
+    tensor = torch.from_numpy(mel_normalized).unsqueeze(0).to(device)
 
-    # 4. Inferencia
+    # 4. Inference
     with torch.no_grad():
         letter_logits, lang_logits = model(tensor)
 
     letter_probs = torch.softmax(letter_logits, dim=-1).squeeze().cpu().numpy()
-    lang_probs   = torch.softmax(lang_logits,   dim=-1).squeeze().cpu().numpy()
+    lang_probs = torch.softmax(lang_logits, dim=-1).squeeze().cpu().numpy()
 
     letter_idx = int(letter_probs.argmax())
-    lang_idx   = int(lang_probs.argmax())
+    lang_idx = int(lang_probs.argmax())
 
     return {
-        "letter":       IDX_TO_LETTER[letter_idx].upper(),
-        "language":     IDX_TO_LANG[lang_idx].capitalize(),
-        "letter_conf":  float(letter_probs[letter_idx]),
-        "lang_conf":    float(lang_probs[lang_idx]),
+        "letter": IDX_TO_LETTER[letter_idx].upper(),
+        "language": IDX_TO_LANG[lang_idx].capitalize(),
+        "letter_conf": float(letter_probs[letter_idx]),
+        "lang_conf": float(lang_probs[lang_idx]),
         "letter_probs": letter_probs,
-        "mel":          mel[0],  # (128, 128) sin normalizar, para la viz
+        "mel": mel[0],  # (128, 128) unnormalized, for visualization
     }
 
 
-# ── Visualizaciones ───────────────────────────────────────────────────────────
+# ── Visualizations ───────────────────────────────────────────────────────────
 
 def plot_melspectrogram(mel: np.ndarray) -> plt.Figure:
-    """Mel-spectrogram real del audio grabado."""
+    """Real mel-spectrogram from recorded audio."""
     fig, ax = plt.subplots(figsize=(7, 3))
     img = ax.imshow(
         mel,
@@ -131,115 +131,124 @@ def plot_melspectrogram(mel: np.ndarray) -> plt.Figure:
         interpolation="nearest",
     )
     ax.set_title("Mel-spectrogram", fontsize=12)
-    ax.set_xlabel("Frames temporales")
-    ax.set_ylabel("Bandas Mel")
+    ax.set_xlabel("Time frames")
+    ax.set_ylabel("Mel bands")
     fig.colorbar(img, ax=ax, format="%+2.0f dB")
     plt.tight_layout()
     return fig
 
 
 def plot_top5(letter_probs: np.ndarray) -> plt.Figure:
-    """Barras horizontales con el top-5 de letras más probables."""
-    top5_idx  = np.argsort(letter_probs)[::-1][:5]
+    """Horizontal bars with the top-5 most likely letters."""
+    top5_idx = np.argsort(letter_probs)[::-1][:5]
     top5_letters = [IDX_TO_LETTER[i].upper() for i in top5_idx]
-    top5_probs   = letter_probs[top5_idx]
+    top5_probs = letter_probs[top5_idx]
 
     colors = ["#667eea" if i > 0 else "#764ba2" for i in range(5)]
 
     fig, ax = plt.subplots(figsize=(5, 3))
     bars = ax.barh(top5_letters[::-1], top5_probs[::-1], color=colors[::-1])
     ax.set_xlim(0, 1)
-    ax.set_xlabel("Probabilidad")
-    ax.set_title("Top-5 letras", fontsize=12)
+    ax.set_xlabel("Probability")
+    ax.set_title("Top-5 letters", fontsize=12)
 
     for bar, prob in zip(bars, top5_probs[::-1]):
         ax.text(
             bar.get_width() + 0.01,
             bar.get_y() + bar.get_height() / 2,
             f"{prob:.2%}",
-            va="center", fontsize=9,
+            va="center",
+            fontsize=9,
         )
 
     plt.tight_layout()
     return fig
 
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+# ── UI ───────────────────────────────────────────────────────────────────────
 
 st.title("🎤 AlphaSound — Demo")
 st.markdown(
-    "Graba una letra del abecedario y el modelo predice **qué letra** es "
-    "y en qué **idioma** fue pronunciada."
+    "Record a letter from the alphabet and the model predicts **which letter** "
+    "it is and in which **language** it was pronounced."
 )
 
-# Cargar modelo
+# Load model
 model, device = load_model()
 
 if model is None:
     st.warning(
-        "⚠️ No se encontró ningún checkpoint entrenado en "
+        "⚠️ No trained checkpoint was found at "
         f"`{CHECKPOINT_PATH}`.\n\n"
-        "Entrena primero el modelo con:\n"
+        "Train the model first with:\n"
         "```\npython src/train.py --data_dir data/processed --n_letters 27\n```"
     )
     st.stop()
 
-st.success(f"Modelo cargado · {N_LETTERS} letras · dispositivo: `{device}`")
+st.success(f"Model loaded · {N_LETTERS} letters · device: `{device}`")
 st.divider()
 
-# ── Dos modos de entrada ──────────────────────────────────────────────────────
-tab_mic, tab_file = st.tabs(["🎙️ Grabar", "📂 Subir archivo (.ogg / .wav)"])
+# ── Two input modes ──────────────────────────────────────────────────────────
+tab_mic, tab_file = st.tabs(["🎙️ Record", "📂 Upload file (.ogg / .wav)"])
 
-tmp_path = None
+temp_path = None
 
 with tab_mic:
-    audio_bytes = st.audio_input("Graba una letra")
+    audio_bytes = st.audio_input("Record a letter")
     if audio_bytes:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp.write(audio_bytes.read())
-            tmp_path = tmp.name
-        st.audio(tmp_path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
+            temp_file.write(audio_bytes.read())
+            temp_path = temp_file.name
+        st.audio(temp_path)
 
 with tab_file:
-    uploaded = st.file_uploader(
-        "Sube un fichero de audio del dataset original",
+    uploaded_file = st.file_uploader(
+        "Upload an audio file from the original dataset",
         type=["ogg", "wav"],
-        help="Usa un .ogg del dataset para comprobar si el modelo funciona "
-             "con los datos de entrenamiento originales.",
+        help="Use a .ogg file from the dataset to check whether the model works "
+             "with the original training data.",
     )
-    if uploaded:
-        suffix = "." + uploaded.name.split(".")[-1]
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(uploaded.read())
-            tmp_path = tmp.name
-        st.audio(tmp_path)
-        # Mostrar qué letra e idioma se esperan según el nombre del fichero
-        stem = uploaded.name.split(".")[0]  # ej: "a_EN_1"
-        expected_letter = stem[0].upper()
-        expected_lang   = "English" if "_EN_" in stem.upper() else \
-                          "Spanish" if "_ES_" in stem.upper() else "?"
-        st.info(f"Esperado según nombre de fichero → **{expected_letter}** · {expected_lang}")
+    if uploaded_file:
+        suffix = "." + uploaded_file.name.split(".")[-1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+            temp_file.write(uploaded_file.read())
+            temp_path = temp_file.name
+        st.audio(temp_path)
 
-# ── Análisis (compartido por ambos modos) ────────────────────────────────────
-if tmp_path and st.button("🚀 Analizar", use_container_width=True):
-    with st.spinner("Analizando audio..."):
+        # Show expected letter and language based on filename
+        stem = uploaded_file.name.split(".")[0]  # example: "a_EN_1"
+        expected_letter = stem[0].upper()
+        expected_language = (
+            "English" if "_EN_" in stem.upper() else
+            "Spanish" if "_ES_" in stem.upper() else
+            "?"
+        )
+        st.info(
+            f"Expected from filename → **{expected_letter}** · {expected_language}"
+        )
+
+# ── Analysis (shared by both modes) ──────────────────────────────────────────
+if temp_path and st.button("🚀 Analyze", use_container_width=True):
+    with st.spinner("Analyzing audio..."):
         try:
-            result = predict(tmp_path, model, device)
+            result = predict(temp_path, model, device)
         except Exception as e:
-            st.error(f"Error al procesar el audio: {e}")
+            st.error(f"Error processing audio: {e}")
             st.stop()
 
-    # ── Efecto de escritura ───────────────────────────────────────────────
+    # ── Typing effect ──────────────────────────────────────────────────────
     placeholder = st.empty()
-    msg = "Procesando resultados..."
-    displayed = ""
-    for char in msg:
-        displayed += char
-        placeholder.markdown(f"*{displayed}*")
+    message = "Processing results..."
+    displayed_text = ""
+
+    for char in message:
+        displayed_text += char
+        placeholder.markdown(f"*{displayed_text}*")
         time.sleep(0.025)
+
     placeholder.empty()
 
-    # ── Tarjeta de resultado principal ───────────────────────────────────
+    # ── Main result card ───────────────────────────────────────────────────
     lang_emoji = "🇬🇧" if result["language"] == "English" else "🇪🇸"
 
     st.markdown(
@@ -256,9 +265,9 @@ if tmp_path and st.button("🚀 Analizar", use_container_width=True):
             <h1 style="font-size: 72px; margin: 0;">{result['letter']}</h1>
             <h3 style="margin: 8px 0;">{lang_emoji} {result['language']}</h3>
             <p style="font-size: 16px; opacity: 0.9;">
-                Confianza letra: <strong>{result['letter_conf']:.1%}</strong>
+                Letter confidence: <strong>{result['letter_conf']:.1%}</strong>
                 &nbsp;·&nbsp;
-                Confianza idioma: <strong>{result['lang_conf']:.1%}</strong>
+                Language confidence: <strong>{result['lang_conf']:.1%}</strong>
             </p>
         </div>
 
@@ -272,7 +281,7 @@ if tmp_path and st.button("🚀 Analizar", use_container_width=True):
         unsafe_allow_html=True,
     )
 
-    # ── Gráficas ──────────────────────────────────────────────────────────
+    # ── Charts ────────────────────────────────────────────────────────────
     col1, col2 = st.columns(2)
 
     with col1:
@@ -281,5 +290,5 @@ if tmp_path and st.button("🚀 Analizar", use_container_width=True):
     with col2:
         st.pyplot(plot_top5(result["letter_probs"]))
 
-    # Limpiar fichero temporal
-    os.remove(tmp_path)
+    # Clean temporary file
+    os.remove(temp_path)
