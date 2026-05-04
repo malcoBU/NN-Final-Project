@@ -1,21 +1,21 @@
 """
 model.py
 --------
-EfficientNet-B0 pre-entrenado en ImageNet como backbone compartido,
-con dos cabezas de clasificación independientes:
-  • letter_head  → predice la letra pronunciada  (27 clases: a–z + ñ)
-  • lang_head    → predice el idioma (English=0, Spanish=1)
+Pre-trained EfficientNet-B0 (ImageNet) as a shared backbone,
+with two independent classification heads:
+  • letter_head  → predicts the spoken letter  (27 classes: a–z + ñ)
+  • lang_head    → predicts the language (English=0, Spanish=1)
 
 Transfer learning:
-  El backbone (EfficientNet-B0) viene con pesos pre-entrenados en ImageNet.
-  Aunque ImageNet es visión natural, sus filtros reconocen bordes, texturas
-  y patrones locales que son igualmente útiles en espectrogramas.
-  Se modifica solo el primer conv para aceptar 1 canal (escala de grises)
-  en lugar de 3, promediando los pesos pre-entrenados.
+  The backbone (EfficientNet-B0) comes with weights pre-trained on ImageNet.
+  Although ImageNet is natural vision, its filters recognise edges, textures,
+  and local patterns that are equally useful in spectrograms.
+  Only the first conv is modified to accept 1 channel (greyscale) instead of 3,
+  by averaging the pre-trained weights across the three original channels.
 
-  Estrategia de fine-tuning recomendada:
-  • Fase 1: congelar todo el backbone, entrenar solo las cabezas (5-10 épocas)
-  • Fase 2: descongelar y entrenar todo con LR muy bajo (CosineAnnealingLR)
+  Recommended fine-tuning strategy:
+  • Phase 1: freeze the entire backbone, train only the heads (5–10 epochs)
+  • Phase 2: unfreeze and train everything with a very low LR (CosineAnnealingLR)
 """
 
 import torch
@@ -24,37 +24,37 @@ import torchvision.models as tv_models
 from torchvision.models import EfficientNet_B0_Weights
 
 
-# ── Modelo principal ──────────────────────────────────────────────────────────
+# ── Main model ────────────────────────────────────────────────────────────────
 
 class AudioLetterClassifier(nn.Module):
     """
-    EfficientNet-B0 con cabezas duales para clasificación de letra e idioma.
+    EfficientNet-B0 with dual heads for letter and language classification.
 
-    Arquitectura
+    Architecture
     ------------
-    Input : (B, 1, 128, 128)  — log-Mel spectrogram, 1 canal
+    Input : (B, 1, 128, 128)  — log-Mel spectrogram, 1 channel
 
-    Backbone EfficientNet-B0 (pre-entrenado ImageNet):
-      • Primer Conv2d modificado: 3 canales → 1 canal
-        (pesos inicializados como media de los 3 canales originales)
-      • Extrae un mapa de features de 1280 dimensiones
+    EfficientNet-B0 backbone (pre-trained on ImageNet):
+      • First Conv2d modified: 3 channels → 1 channel
+        (weights initialised as the mean of the 3 original channels)
+      • Extracts a 1280-dimensional feature map
       • AdaptiveAvgPool2d → (B, 1280)
 
-    Cabezas:
+    Heads:
       letter_head : Dropout → Linear(1280 → n_letters)
       lang_head   : Dropout → Linear(1280 → n_langs)
 
     Parameters
     ----------
     n_letters : int
-        Número de clases de letras (default 27: a–z + ñ).
+        Number of letter classes (default 27: a–z + ñ).
     n_langs : int
-        Número de clases de idioma (default 2: EN + ES).
+        Number of language classes (default 2: EN + ES).
     dropout : float
-        Dropout antes de las cabezas de clasificación.
+        Dropout applied before the classification heads.
     freeze_backbone : bool
-        Si True, congela el backbone para la Fase 1 del fine-tuning.
-        Llama a unfreeze_backbone() para descongelar en Fase 2.
+        If True, freezes the backbone for Phase 1 fine-tuning.
+        Call unfreeze_backbone() to unfreeze for Phase 2.
     """
 
     def __init__(
@@ -66,14 +66,14 @@ class AudioLetterClassifier(nn.Module):
     ):
         super().__init__()
 
-        # ── Cargar EfficientNet-B0 pre-entrenado ──────────────────────────────
+        # ── Load pre-trained EfficientNet-B0 ──────────────────────────────────
         efficientnet = tv_models.efficientnet_b0(
             weights=EfficientNet_B0_Weights.IMAGENET1K_V1
         )
 
-        # ── Adaptar primer Conv2d: 3 canales → 1 canal ────────────────────────
-        # EfficientNet-B0: features[0] es ConvNormActivation,
-        # y features[0][0] es el Conv2d de entrada.
+        # ── Adapt first Conv2d: 3 channels → 1 channel ────────────────────────
+        # EfficientNet-B0: features[0] is ConvNormActivation,
+        # and features[0][0] is the input Conv2d.
         first_conv = efficientnet.features[0][0]  # Conv2d(3, 32, ...)
 
         new_first_conv = nn.Conv2d(
@@ -84,24 +84,24 @@ class AudioLetterClassifier(nn.Module):
             padding=first_conv.padding,
             bias=False,
         )
-        # Inicializar con la media de los 3 canales originales:
-        # preserva la mayoría del conocimiento pre-entrenado
+        # Initialise with the mean of the 3 original channels:
+        # preserves most of the pre-trained knowledge
         new_first_conv.weight.data = first_conv.weight.data.mean(
             dim=1, keepdim=True
         )
         efficientnet.features[0][0] = new_first_conv
 
-        # ── Extraer solo la parte de features (sin el classifier original) ────
+        # ── Extract only the feature part (without the original classifier) ───
         self.backbone = efficientnet.features   # → (B, 1280, H', W')
         self.pool     = nn.AdaptiveAvgPool2d(1) # → (B, 1280, 1, 1)
         self.dropout  = nn.Dropout(p=dropout)
 
-        # ── Cabezas de clasificación ──────────────────────────────────────────
-        # 1280 = número de features de salida de EfficientNet-B0
+        # ── Classification heads ──────────────────────────────────────────────
+        # 1280 = number of output features from EfficientNet-B0
         self.letter_head = nn.Linear(1280, n_letters)
         self.lang_head   = nn.Linear(1280, n_langs)
 
-        # Inicialización de las cabezas
+        # Head initialisation
         nn.init.xavier_uniform_(self.letter_head.weight)
         nn.init.zeros_(self.letter_head.bias)
         nn.init.xavier_uniform_(self.lang_head.weight)
@@ -114,34 +114,34 @@ class AudioLetterClassifier(nn.Module):
 
     def freeze_backbone(self) -> None:
         """
-        Fase 1: congela el backbone para entrenar solo las cabezas.
-        Útil cuando el dataset es muy pequeño — evita destruir los pesos
-        pre-entrenados antes de que las cabezas aprendan algo útil.
+        Phase 1: freeze the backbone to train only the heads.
+        Useful when the dataset is very small — prevents destroying the
+        pre-trained weights before the heads have learned anything useful.
         """
         for param in self.backbone.parameters():
             param.requires_grad = False
-        print("Backbone congelado. Solo se entrenan las cabezas.")
+        print("Backbone frozen. Only the heads will be trained.")
 
     def unfreeze_backbone(self) -> None:
         """
-        Fase 2: descongela el backbone para fine-tuning completo.
-        Llamar después de que las cabezas hayan convergido (Fase 1).
-        Usar con un LR mucho más bajo (e.g., 1e-4 o menos).
+        Phase 2: unfreeze the backbone for full fine-tuning.
+        Call after the heads have converged (Phase 1).
+        Use with a much lower LR (e.g. 1e-4 or less).
         """
         for param in self.backbone.parameters():
             param.requires_grad = True
-        print("Backbone descongelado. Fine-tuning completo activado.")
+        print("Backbone unfrozen. Full fine-tuning enabled.")
 
     def unfreeze_last_n_blocks(self, n: int = 3) -> None:
         """
-        Alternativa: descongela solo los últimos n bloques del backbone.
-        Compromiso entre Fase 1 y Fase 2 completo.
+        Alternative: unfreeze only the last n blocks of the backbone.
+        A compromise between Phase 1 and full Phase 2 fine-tuning.
         """
         blocks = list(self.backbone.children())
         for block in blocks[-n:]:
             for param in block.parameters():
                 param.requires_grad = True
-        print(f"Últimos {n} bloques del backbone descongelados.")
+        print(f"Last {n} backbone blocks unfrozen.")
 
     # ── Forward ───────────────────────────────────────────────────────────────
 
@@ -168,39 +168,39 @@ class AudioLetterClassifier(nn.Module):
     def predict(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Inferencia: devuelve índices de clase directamente."""
+        """Inference: returns class indices directly."""
         self.eval()
         with torch.no_grad():
             letter_logits, lang_logits = self.forward(x)
         return letter_logits.argmax(dim=-1), lang_logits.argmax(dim=-1)
 
     def count_parameters(self) -> int:
-        """Parámetros entrenables totales."""
+        """Total trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
     def count_trainable_vs_total(self) -> tuple[int, int]:
-        """Devuelve (entrenables, total) — útil para ver qué está congelado."""
+        """Returns (trainable, total) — useful for inspecting what is frozen."""
         total     = sum(p.numel() for p in self.parameters())
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         return trainable, total
 
 
-# ── Loss function (sin cambios) ───────────────────────────────────────────────
+# ── Loss function ─────────────────────────────────────────────────────────────
 
 class DualTaskLoss(nn.Module):
     """
-    Suma ponderada de dos CrossEntropy (letra + idioma).
+    Weighted sum of two CrossEntropy losses (letter + language).
 
-    Total Loss = letter_weight × CE(letra) + lang_weight × CE(idioma)
+    Total Loss = letter_weight × CE(letter) + lang_weight × CE(language)
 
     Parameters
     ----------
     letter_weight : float
-        Peso de la loss de letra (tarea principal). Default 0.7.
+        Weight for the letter loss (primary task). Default 0.7.
     lang_weight : float
-        Peso de la loss de idioma (tarea auxiliar). Default 0.3.
+        Weight for the language loss (auxiliary task). Default 0.3.
     label_smoothing : float
-        Suavizado de etiquetas para evitar predicciones sobreconfiadas.
+        Label smoothing to prevent overconfident predictions.
     """
 
     def __init__(
@@ -230,7 +230,7 @@ class DualTaskLoss(nn.Module):
         """
         Returns
         -------
-        total_loss, letter_loss, lang_loss  — todos escalares
+        total_loss, letter_loss, lang_loss  — all scalars
         """
         l_loss  = self.letter_criterion(letter_logits, letter_targets)
         la_loss = self.lang_criterion(lang_logits,     lang_targets)
