@@ -1,14 +1,14 @@
 """
 train.py
 --------
-Bucle de entrenamiento para AlphaSound (CNN dual-head: letra + idioma).
+Training loop for AlphaSound (dual-head CNN: letter + language).
 
-Uso
----
-    # Desde la raíz del proyecto:
+Usage
+-----
+    # From the project root:
     python src/train.py --data_dir data/processed
 
-    # Con opciones:
+    # With options:
     python src/train.py \\
         --data_dir  data/processed \\
         --epochs    60             \\
@@ -17,9 +17,9 @@ Uso
         --num_workers 4            \\
         --checkpoint_dir checkpoints
 
-Dispositivo
------------
-Se detecta automáticamente: CUDA → MPS (Apple Silicon) → CPU.
+Device
+------
+Auto-detected: CUDA → MPS (Apple Silicon) → CPU.
 """
 
 import argparse
@@ -33,14 +33,14 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-# Asegurar que src/ está en el path cuando se llama desde la raíz
+# Ensure src/ is on the path when called from the project root
 sys.path.insert(0, os.path.dirname(__file__))
 
-from dataset import build_dataloaders, save_label_maps
+from dataset import build_dataloaders, save_label_maps, VOWELS
 from model   import AudioLetterClassifier, DualTaskLoss
 
 
-# ── Utilidades ────────────────────────────────────────────────────────────────
+# ── Utilities ─────────────────────────────────────────────────────────────────
 
 def get_device() -> torch.device:
     if torch.cuda.is_available():
@@ -49,12 +49,12 @@ def get_device() -> torch.device:
         device = torch.device("mps")
     else:
         device = torch.device("cpu")
-    print(f"Dispositivo: {device}")
+    print(f"Device: {device}")
     return device
 
 
 def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
-    """Accuracy de clasificación a partir de logits crudos."""
+    """Classification accuracy from raw logits."""
     preds = logits.argmax(dim=-1)
     return (preds == targets).float().mean().item()
 
@@ -64,7 +64,7 @@ def format_time(seconds: float) -> str:
     return f"{m}m {s:02d}s"
 
 
-# ── Un paso de entrenamiento ──────────────────────────────────────────────────
+# ── Single training epoch ─────────────────────────────────────────────────────
 
 def train_one_epoch(
     model: AudioLetterClassifier,
@@ -75,11 +75,11 @@ def train_one_epoch(
     epoch: int,
 ) -> dict:
     """
-    Pasa una época completa de entrenamiento.
+    Run one full training epoch.
 
-    Devuelve
-    --------
-    dict con loss_total, loss_letter, loss_lang, acc_letter, acc_lang
+    Returns
+    -------
+    dict with loss_total, loss_letter, loss_lang, acc_letter, acc_lang
     """
     model.train()
 
@@ -106,19 +106,19 @@ def train_one_epoch(
 
         loss.backward()
 
-        # Gradient clipping: evita explosión de gradientes
+        # Gradient clipping: prevents gradient explosion
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
 
-        # Acumulación de métricas
+        # Metric accumulation
         total_loss    += loss.item()
         total_l_loss  += l_loss.item()
         total_la_loss += la_loss.item()
         total_l_acc   += accuracy(letter_logits, letter_targets)
         total_la_acc  += accuracy(lang_logits,   lang_targets)
 
-        # Log cada 10 batches (o al final)
+        # Log every 10 batches (or at the end)
         if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == n_batches:
             print(
                 f"  Epoch {epoch} [{batch_idx+1}/{n_batches}] "
@@ -128,7 +128,7 @@ def train_one_epoch(
                 end="\r",
             )
 
-    print()  # salto de línea tras el \r
+    print()  # newline after \r
 
     return {
         "loss_total":  total_loss   / n_batches,
@@ -139,7 +139,7 @@ def train_one_epoch(
     }
 
 
-# ── Un paso de validación ─────────────────────────────────────────────────────
+# ── Validation pass ───────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def validate(
@@ -149,11 +149,11 @@ def validate(
     device: torch.device,
 ) -> dict:
     """
-    Pasa el conjunto de validación completo sin gradientes.
+    Run the full validation set without gradients.
 
-    Devuelve
-    --------
-    dict con loss_total, loss_letter, loss_lang, acc_letter, acc_lang
+    Returns
+    -------
+    dict with loss_total, loss_letter, loss_lang, acc_letter, acc_lang
     """
     model.eval()
 
@@ -191,7 +191,7 @@ def validate(
     }
 
 
-# ── Guardado de checkpoint ────────────────────────────────────────────────────
+# ── Checkpoint saving ─────────────────────────────────────────────────────────
 
 def save_checkpoint(
     model: AudioLetterClassifier,
@@ -201,15 +201,15 @@ def save_checkpoint(
     path: str,
 ) -> None:
     """
-    Guarda el estado completo del modelo.
+    Save the full model state.
 
-    El checkpoint incluye:
-      • model_state     → pesos del modelo
-      • optimizer_state → estado del optimizador (útil para reanudar)
-      • epoch           → época en la que se guardó
-      • metrics         → métricas de validación de esa época
+    The checkpoint includes:
+      • model_state     → model weights
+      • optimizer_state → optimizer state (useful for resuming)
+      • epoch           → epoch at which it was saved
+      • metrics         → validation metrics for that epoch
 
-    Para cargar el modelo en evaluate.py o inferencia:
+    To load the model in evaluate.py or for inference:
         ckpt = torch.load("checkpoints/best_model.pt")
         model.load_state_dict(ckpt["model_state"])
     """
@@ -222,13 +222,23 @@ def save_checkpoint(
     }, path)
 
 
-# ── Bucle principal ───────────────────────────────────────────────────────────
+# ── Main training loop ────────────────────────────────────────────────────────
 
 def train(args: argparse.Namespace) -> None:
     device = get_device()
 
     # ── DataLoaders ───────────────────────────────────────────────────────────
-    print("\n── Cargando datos ──────────────────────────────────────")
+    print("\n── Loading data ────────────────────────────────────────")
+
+    # Letter subset: --vowels_only or --letters_subset a e i o u
+    letters_subset = None
+    if args.vowels_only:
+        letters_subset = VOWELS
+        print(f"  Mode: vowels only {VOWELS}")
+    elif args.letters_subset:
+        letters_subset = [l.lower() for l in args.letters_subset]
+        print(f"  Mode: custom subset {letters_subset}")
+
     train_loader, val_loader, _ = build_dataloaders(
         root_dir=args.data_dir,
         batch_size=args.batch_size,
@@ -237,32 +247,37 @@ def train(args: argparse.Namespace) -> None:
         normalize=True,
         use_weighted_sampler=True,
         seed=args.seed,
+        letters_subset=letters_subset,
     )
 
-    # Guardar label maps para inferencia posterior
+    # Save label maps for later inference
     save_label_maps("./data/label_maps.json")
 
-    # ── Modelo ────────────────────────────────────────────────────────────────
-    print("\n── Inicializando modelo (EfficientNet-B0, backbone congelado) ───")
+    # n_letters is derived from the actual dataset so it always matches the subset
+    n_letters_actual = train_loader.dataset.n_letters()
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    print("\n── Initialising model (EfficientNet-B0, backbone frozen) ───")
+    print(f"   Letter classes : {n_letters_actual}")
     model = AudioLetterClassifier(
-        n_letters=args.n_letters,
+        n_letters=n_letters_actual,
         n_langs=args.n_langs,
         dropout=args.dropout,
-        freeze_backbone=True,   # backbone siempre congelado
+        freeze_backbone=True,   # backbone always frozen
     ).to(device)
 
     trainable, total = model.count_trainable_vs_total()
-    print(f"Parámetros entrenables : {trainable:,} / {total:,}  "
+    print(f"Trainable parameters : {trainable:,} / {total:,}  "
           f"({100*trainable/total:.1f}%)")
 
-    # ── Pérdida ───────────────────────────────────────────────────────────────
+    # ── Loss ──────────────────────────────────────────────────────────────────
     criterion = DualTaskLoss(
         letter_weight=args.letter_weight,
         lang_weight=args.lang_weight,
         label_smoothing=args.label_smoothing,
     )
 
-    # ── Optimizador y scheduler ───────────────────────────────────────────────
+    # ── Optimizer and scheduler ───────────────────────────────────────────────
     optimizer = AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
@@ -272,19 +287,19 @@ def train(args: argparse.Namespace) -> None:
         optimizer, T_max=args.epochs, eta_min=args.lr * 0.01
     )
 
-    # ── Preparar checkpoint ───────────────────────────────────────────────────
+    # ── Checkpoint setup ──────────────────────────────────────────────────────
     best_val_loss  = float("inf")
     best_val_acc   = 0.0
     best_ckpt_path = os.path.join(args.checkpoint_dir, "best_model.pt")
     last_ckpt_path = os.path.join(args.checkpoint_dir, "last_model.pt")
     history        = []
 
-    print(f"\n── Entrenamiento: {args.epochs} épocas ──────────────────────────")
+    print(f"\n── Training: {args.epochs} epochs ──────────────────────────")
     print(f"   LR            : {args.lr}")
     print(f"   Batch size    : {args.batch_size}")
     print(f"   Dropout       : {args.dropout}")
     print(f"   Label smooth  : {args.label_smoothing}")
-    print(f"   Backbone      : CONGELADO (sin fase 2)\n")
+    print(f"   Backbone      : FROZEN (no phase 2)\n")
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
@@ -296,7 +311,7 @@ def train(args: argparse.Namespace) -> None:
         elapsed = time.time() - t0
 
         print(
-            f"Época {epoch:02d}/{args.epochs}  [{format_time(elapsed)}]  "
+            f"Epoch {epoch:02d}/{args.epochs}  [{format_time(elapsed)}]  "
             f"LR={scheduler.get_last_lr()[0]:.2e}\n"
             f"  TRAIN → loss={train_metrics['loss_total']:.4f}  "
             f"acc_letter={train_metrics['acc_letter']:.4f}  "
@@ -310,7 +325,7 @@ def train(args: argparse.Namespace) -> None:
             best_val_loss = val_metrics["loss_total"]
             best_val_acc  = val_metrics["acc_letter"]
             save_checkpoint(model, optimizer, epoch, val_metrics, best_ckpt_path)
-            print(f"  ✓ Mejor modelo guardado (val_loss={best_val_loss:.4f})")
+            print(f"  ✓ Best model saved (val_loss={best_val_loss:.4f})")
 
         save_checkpoint(model, optimizer, epoch, val_metrics, last_ckpt_path)
         history.append({
@@ -321,20 +336,20 @@ def train(args: argparse.Namespace) -> None:
         })
         print()
 
-    # ── Resumen final ─────────────────────────────────────────────────────────
+    # ── Final summary ─────────────────────────────────────────────────────────
     print("═" * 60)
-    print(f"Entrenamiento completado.")
-    print(f"Mejor val_loss   : {best_val_loss:.4f}")
-    print(f"Mejor acc_letter : {best_val_acc:.4f}")
-    print(f"Checkpoint guardado en: {best_ckpt_path}")
+    print(f"Training complete.")
+    print(f"Best val_loss   : {best_val_loss:.4f}")
+    print(f"Best acc_letter : {best_val_acc:.4f}")
+    print(f"Checkpoint saved at: {best_ckpt_path}")
     print("═" * 60)
 
-    # Guardar historial en CSV sencillo
+    # Save per-epoch metrics history to a simple CSV
     _save_history(history, args.checkpoint_dir)
 
 
 def _save_history(history: list[dict], out_dir: str) -> None:
-    """Guarda el historial de métricas por época en un CSV."""
+    """Save the per-epoch metrics history to a CSV file."""
     if not history:
         return
     path = os.path.join(out_dir, "training_history.csv")
@@ -344,46 +359,54 @@ def _save_history(history: list[dict], out_dir: str) -> None:
         f.write(",".join(keys) + "\n")
         for row in history:
             f.write(",".join(str(row[k]) for k in keys) + "\n")
-    print(f"Historial guardado en: {path}")
+    print(f"History saved to: {path}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Entrena el clasificador AlphaSound (letra + idioma)"
+        description="Train the AlphaSound classifier (letter + language)"
     )
 
-    # Datos
+    # Data
     p.add_argument("--data_dir",      default="data/processed",
-                   help="Directorio raíz con los .npy (contiene english/ y spanish/)")
+                   help="Root directory containing the .npy files (english/ and spanish/)")
     p.add_argument("--checkpoint_dir", default="checkpoints",
-                   help="Dónde guardar los checkpoints")
+                   help="Where to save checkpoints")
     p.add_argument("--num_workers",   type=int, default=4,
-                   help="Workers para DataLoader (pon 0 en Windows)")
+                   help="DataLoader workers (set to 0 on Windows)")
     p.add_argument("--seed",          type=int, default=42)
 
-    # Modelo
+    # Model
     p.add_argument("--n_letters",  type=int,   default=26,
-                   help="Número de clases de letras")
+                   help="Number of letter classes")
     p.add_argument("--n_langs",    type=int,   default=2,
-                   help="Número de clases de idioma")
+                   help="Number of language classes")
     p.add_argument("--dropout",    type=float, default=0.1,
-                   help="Dropout antes de las cabezas (reducido para no bloquear el aprendizaje)")
+                   help="Dropout before the heads (kept low to avoid blocking learning)")
 
-    # Entrenamiento
+    # Training
     p.add_argument("--epochs",       type=int,   default=60)
     p.add_argument("--batch_size",   type=int,   default=32)
     p.add_argument("--lr",           type=float, default=1e-3)
     p.add_argument("--weight_decay", type=float, default=1e-4)
     p.add_argument("--augment_prob", type=float, default=0.0,
-                   help="Prob. augmentación online (0.0 si ya usaste offline_augment.py)")
+                   help="Online augmentation probability (0.0 if offline_augment.py was already run)")
 
-    # Pérdida
+    # Loss
     p.add_argument("--letter_weight",   type=float, default=0.7)
     p.add_argument("--lang_weight",     type=float, default=0.3)
     p.add_argument("--label_smoothing", type=float, default=0.0,
-                   help="Label smoothing (0.0 = sin suavizado, señal de gradiente limpia)")
+                   help="Label smoothing (0.0 = no smoothing, clean gradient signal)")
+
+    # Letter subset
+    p.add_argument("--vowels_only",     action="store_true",
+                   help="Train with the 5 vowels only (a,e,i,o,u). "
+                        "Equivalent to --letters_subset a e i o u.")
+    p.add_argument("--letters_subset",  nargs="+", default=None, metavar="LETTER",
+                   help="List of letters to use (e.g. --letters_subset a b c d e). "
+                        "If not specified, all letters are used.")
 
     return p.parse_args()
 

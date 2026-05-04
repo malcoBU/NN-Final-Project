@@ -1,32 +1,32 @@
 """
 offline_augment.py
 ------------------
-Genera versiones aumentadas de cada waveform .npy en data/processed/
-y las guarda como nuevos ficheros, multiplicando el dataset.
+Generates augmented versions of every .npy waveform in data/processed/
+and saves them as new files, multiplying the dataset size.
 
-Por qué offline (pre-generado) en lugar de online (en el DataLoader)
----------------------------------------------------------------------
-Con solo ~540 muestras originales, incluso con augmentación online el modelo
-ve pocas variaciones por época. Generando ×15 copias pre-aumentadas el
-dataset pasa a ~8.100 muestras únicas que el modelo puede explorar libremente.
+Why offline (pre-generated) instead of online (in the DataLoader)
+------------------------------------------------------------------
+With only ~540 original samples, even with online augmentation the model
+sees few variations per epoch. By pre-generating ×15 augmented copies, the
+dataset grows to ~8,100 unique samples that the model can explore freely.
 
-Estructura de salida
---------------------
-Cada fichero  data/processed/english/a_EN_1.npy
-genera        data/processed/english/a_EN_1_aug_01.npy
-              data/processed/english/a_EN_1_aug_02.npy
-              ...
-              data/processed/english/a_EN_1_aug_15.npy
+Output structure
+----------------
+Each file  data/processed/english/a_EN_1.npy
+generates  data/processed/english/a_EN_1_aug_01.npy
+           data/processed/english/a_EN_1_aug_02.npy
+           ...
+           data/processed/english/a_EN_1_aug_15.npy
 
-Los ficheros originales NO se modifican ni eliminan.
-Los ficheros _aug_ existentes se saltan para no re-aumentar.
+Original files are NOT modified or deleted.
+Existing _aug_ files are skipped to avoid re-augmenting.
 
-Uso
----
-    # Desde la raíz del proyecto:
+Usage
+-----
+    # From the project root:
     python src/offline_augment.py
 
-    # Con opciones:
+    # With options:
     python src/offline_augment.py --data_dir data/processed --n_aug 15
 """
 
@@ -37,13 +37,13 @@ from pathlib import Path
 
 import numpy as np
 
-# Asegurar que src/ está en el path
+# Ensure src/ is on the path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from augment import augment
 
 
-# ── Función principal ─────────────────────────────────────────────────────────
+# ── Main function ─────────────────────────────────────────────────────────────
 
 def generate_augmented_dataset(
     data_dir: str,
@@ -52,20 +52,20 @@ def generate_augmented_dataset(
     verbose: bool = True,
 ) -> dict:
     """
-    Recorre data_dir buscando ficheros .npy originales (sin _aug_ en el nombre)
-    y genera n_aug versiones aumentadas de cada uno.
+    Walk data_dir looking for original .npy files (without _aug_ in the name)
+    and generate n_aug augmented versions of each.
 
     Parameters
     ----------
     data_dir : str
-        Directorio raíz con los .npy (contiene english/ y spanish/).
+        Root directory containing the .npy files (english/ and spanish/).
     n_aug : int
-        Número de copias aumentadas por fichero original.
+        Number of augmented copies per original file.
     p_apply : float
-        Probabilidad de aplicar cada transform individual.
-        Con 1.0 se aplican todas; con 0.8 hay algo de variabilidad extra.
+        Probability of applying each individual transform.
+        With 1.0 all transforms are applied; with 0.8 there is some extra variability.
     verbose : bool
-        Muestra progreso en pantalla.
+        Print progress to stdout.
 
     Returns
     -------
@@ -75,29 +75,29 @@ def generate_augmented_dataset(
     data_dir = Path(data_dir)
     stats = {"original": 0, "generated": 0, "skipped": 0, "failed": 0}
 
-    # Buscar todos los .npy originales directamente en data_dir
-    # (sin subcarpetas english/ ni spanish/ — el idioma va en el nombre del fichero)
+    # Find all original .npy files directly in data_dir
+    # (the language is encoded in the filename, not the subfolder)
     originals = [
         f for f in sorted(data_dir.rglob("*.npy"))
         if "_aug_" not in f.stem
     ]
 
     if not originals:
-        print(f"No se encontraron ficheros .npy en '{data_dir}'.")
+        print(f"No .npy files found in '{data_dir}'.")
         return stats
 
     stats["original"] = len(originals)
     total_to_generate = len(originals) * n_aug
 
     if verbose:
-        print(f"Ficheros originales encontrados : {len(originals)}")
-        print(f"Copias por fichero               : {n_aug}")
-        print(f"Total a generar                  : {total_to_generate}")
-        print(f"Dataset final estimado           : {len(originals) + total_to_generate}\n")
+        print(f"Original files found  : {len(originals)}")
+        print(f"Copies per file       : {n_aug}")
+        print(f"Total to generate     : {total_to_generate}")
+        print(f"Estimated final size  : {len(originals) + total_to_generate}\n")
 
     for i, npy_path in enumerate(originals):
         if verbose:
-            # Barra de progreso simple
+            # Simple progress bar
             pct = (i + 1) / len(originals) * 100
             print(f"  [{pct:5.1f}%] {npy_path.name}", end="  ")
 
@@ -105,17 +105,17 @@ def generate_augmented_dataset(
             y_original = np.load(str(npy_path))
         except Exception as e:
             if verbose:
-                print(f"ERROR al cargar: {e}")
+                print(f"ERROR loading: {e}")
             stats["failed"] += 1
             continue
 
         generated_count = 0
         for aug_idx in range(1, n_aug + 1):
-            # Nombre del fichero aumentado: a_EN_1_aug_01.npy
+            # Augmented filename: a_EN_1_aug_01.npy
             aug_stem = f"{npy_path.stem}_aug_{aug_idx:02d}"
             aug_path = npy_path.parent / f"{aug_stem}.npy"
 
-            # Saltar si ya existe (para poder relanzar el script sin duplicar)
+            # Skip if already exists (allows re-running the script without duplicating)
             if aug_path.exists():
                 stats["skipped"] += 1
                 continue
@@ -128,18 +128,18 @@ def generate_augmented_dataset(
             except Exception as e:
                 stats["failed"] += 1
                 if verbose:
-                    print(f"\n    ERROR en aug {aug_idx}: {e}", end="")
+                    print(f"\n    ERROR on aug {aug_idx}: {e}", end="")
 
         if verbose:
-            print(f"→ +{generated_count} ficheros")
+            print(f"→ +{generated_count} files")
 
     if verbose:
         print(f"\n{'─' * 50}")
-        print(f"Originales      : {stats['original']}")
-        print(f"Generados       : {stats['generated']}")
-        print(f"Ya existían     : {stats['skipped']}")
-        print(f"Errores         : {stats['failed']}")
-        print(f"Total en disco  : {stats['original'] + stats['generated']}")
+        print(f"Originals     : {stats['original']}")
+        print(f"Generated     : {stats['generated']}")
+        print(f"Already exist : {stats['skipped']}")
+        print(f"Errors        : {stats['failed']}")
+        print(f"Total on disk : {stats['original'] + stats['generated']}")
         print(f"{'─' * 50}")
 
     return stats
@@ -149,28 +149,28 @@ def generate_augmented_dataset(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Genera versiones aumentadas offline de los .npy del dataset"
+        description="Generate offline augmented versions of the dataset .npy files"
     )
     p.add_argument(
         "--data_dir", default="data/processed",
-        help="Directorio raíz con los .npy (default: data/processed)"
+        help="Root directory containing the .npy files (default: data/processed)"
     )
     p.add_argument(
         "--n_aug", type=int, default=15,
-        help="Número de copias aumentadas por fichero original (default: 15)"
+        help="Number of augmented copies per original file (default: 15)"
     )
     p.add_argument(
         "--p_apply", type=float, default=1.0,
-        help="Probabilidad de aplicar cada transform (default: 1.0)"
+        help="Probability of applying each transform (default: 1.0)"
     )
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    print(f"\n── Augmentación offline ────────────────────────────────")
-    print(f"Directorio : {args.data_dir}")
-    print(f"Copias     : ×{args.n_aug} por fichero original\n")
+    print(f"\n── Offline augmentation ────────────────────────────────")
+    print(f"Directory : {args.data_dir}")
+    print(f"Copies    : ×{args.n_aug} per original file\n")
 
     generate_augmented_dataset(
         data_dir=args.data_dir,
